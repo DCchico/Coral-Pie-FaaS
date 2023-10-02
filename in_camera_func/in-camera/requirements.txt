@@ -1,0 +1,6 @@
+scipy
+opencv-python
+filterpy
+gremlinpython
+minio
+jsonpickle

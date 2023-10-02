@@ -1,0 +1,56 @@
+import time
+from torchvision.io.image import read_image
+from torchvision.models.detection import ssdlite320_mobilenet_v3_large, SSDLite320_MobileNet_V3_Large_Weights
+import torchvision.transforms.functional as transform
+from PIL import Image
+import io
+import json
+
+# Load the model and weights
+weights = SSDLite320_MobileNet_V3_Large_Weights.DEFAULT
+model = ssdlite320_mobilenet_v3_large(weights=weights, box_score_thresh=0.9)
+model.eval()
+
+def handle(event, context):
+    try:
+        # Load input image from event
+        image_data = event.body
+        image = Image.open(io.BytesIO(image_data))
+        # The image can be converted to tensor using
+        img = transform.to_tensor(image)
+
+        # Apply inference preprocessing
+        preprocess = weights.transforms()
+        start_preprocess = time.time()
+        batch = [preprocess(img)]
+        end_preprocess = time.time()
+
+        # Run model prediction
+        start_prediction = time.time()
+        prediction = model(batch)[0]
+        end_prediction = time.time()
+
+        labels = [weights.meta["categories"][i] for i in prediction["labels"]]
+
+        top_k = 10
+        bboxes = []
+        for i in range(top_k):
+            if labels[i] == 'car':
+                bboxes.append(prediction["boxes"][i].tolist())
+
+        return {
+            "statusCode": 200,
+            "body": json.dumps({
+                "bounding_boxes": bboxes,
+                "preprocessing_time": end_preprocess - start_preprocess,
+                "prediction_time": end_prediction - start_prediction
+            }),
+            "headers": {
+                "Content-Type": "application/json"
+            }
+        }
+    except Exception as e:
+        return {
+            "statusCode": 500,
+            "body": f"Internal Server Error: {str(e)}"
+        }

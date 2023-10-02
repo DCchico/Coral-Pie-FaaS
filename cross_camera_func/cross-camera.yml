@@ -1,0 +1,14 @@
+version: 1.0
+provider:
+  name: openfaas
+  gateway: http://127.0.0.1:31112
+functions:
+  cross-camera:
+    lang: python3-http
+    handler: ./cross-camera
+    image: dcchico/cross-camera:latest
+    environment:
+      MINIO_ADDR: "10.100.1.239:9002"
+      MINIO_ACCESS_KEY: "Bt0NbjOaRw9ucFcM5Xq8"
+      MINIO_SECRET_KEY: "hlWkw9zuxOzxlExv2tpn7LkL1qtFTiddWU0PEfb9"
+
