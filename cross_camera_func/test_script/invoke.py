@@ -4,6 +4,24 @@ import base64
 import jsonpickle
 import time
 import statistics
+from flask import Flask, request
+from minio import Minio
+
+
+app = Flask(__name__)
+
+resource = {}
+
+@app.route('/webhook', methods=['POST'])
+def receive_webhook():
+  
+    data = request.json  
+    api = data["api"]
+    print(data)
+
+
+    return {"message": "Resource updated successfully", "resource": resource}, 200
+
 
 # Load the image from a file and encode it as base64
 image_path = "coldstart.jpeg"
@@ -12,6 +30,7 @@ with open('coldstart.jpeg', 'rb') as image_file:
 
 url_in_camera = "http://127.0.0.1:31112/function/in-camera"
 url_cross_camera = "http://127.0.0.1:31112/function/cross-camera"
+
 
 input_data = {
                 "camera_id": "camera_0",

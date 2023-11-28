@@ -20,10 +20,10 @@ def handle(event, context):
     # Initialize OpenFaaS function
     tgraph = TrajectoryGraph()
     pool = CandidatePool()
-    coldstart(tgraph) # TODO: Comment this out for real measurement
+    # coldstart(tgraph) # TODO: Comment this out for real measurement
     try:
         # Deserialize the input data using jsonpickle 
-        input_data = jsonpickle.decode(event.body.decode('utf-8'))
+        input_data = jsonpickle.decode(event.body)
         leaving_vehicles = input_data["leaving_vehicles"]
         entering_vehicles = input_data["entering_vehicles"]
         camera_id = input_data["camera_id"]
@@ -43,7 +43,7 @@ def handle(event, context):
         # )
 
         # Process leaving vehicles
-        camera_connections = load_camera_connections('camera_connections.csv')
+        camera_connections = load_camera_connections('/home/app/function/camera_connections.csv')
         reachable_cameras = find_reachable_cameras(camera_connections, camera_id)
         for neighbor_camera in reachable_cameras:
             start_download_time = time.time()
@@ -94,7 +94,12 @@ def handle(event, context):
         # Return a response with the list of lists
         response = {
             "statusCode": 200,
-            "body": "Success"
+            "body": json.dumps({
+                "download_time": download_time * 1000.0
+            }),
+            "headers": {
+                "Content-Type": "application/json"
+            }
         }
         return response
 

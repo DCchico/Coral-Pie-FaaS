@@ -6,5 +6,6 @@ functions:
   detection:
     lang: python3-http
     handler: ./detection
-    image: dcchico/coral-detection:latest
+    image: dcchico/coral-detection:microbenchmark
+
 

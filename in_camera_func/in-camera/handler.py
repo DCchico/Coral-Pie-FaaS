@@ -73,7 +73,7 @@ def handle(event, context):
         response_data = {
             "leaving_vehicles": [],
             "entering_vehicles": [],
-            "camera_id": camera_id
+            "camera_id": camera_id,
         }  # Lists to store [vertexid, vehicle.id, hist]
 
         for vehicle in leaving_vehicles:
@@ -116,7 +116,8 @@ def handle(event, context):
     
         logging.info("End-to-end latency: %.6f seconds", latency)
 
-
+        response_data["download_time"] = download_time
+        response_data["upload_time"] = upload_time
         # Return a response with the list of lists
         response = {
             "statusCode": 200,

@@ -6,7 +6,7 @@ functions:
   cross-camera:
     lang: python3-http
     handler: ./cross-camera
-    image: dcchico/cross-camera:latest
+    image: dcchico/cross-camera:microbenchmark
     environment:
       MINIO_ADDR: "10.100.1.239:9002"
       MINIO_ACCESS_KEY: "Bt0NbjOaRw9ucFcM5Xq8"
