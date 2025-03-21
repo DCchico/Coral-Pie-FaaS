@@ -1,0 +1,13 @@
+version: 1.0
+provider:
+  name: openfaas
+  gateway: http://128.110.217.204:8081
+functions:
+  in-camera:
+    lang: python3-http
+    handler: ./in-camera
+    image: dcchico/in-camera-control-centric:latest
+    environment:
+      REDIS_ADDR: "128.110.217.193"
+      JANUS_ADDR: "128.110.217.193"
+

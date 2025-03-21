@@ -8,8 +8,8 @@ import statistics
 import ast
 
 # Define the URL of your deployed OpenFaaS function
-inCamerafunction_url = "http://127.0.0.1:31112/function/in-camera"
-crossCamerafunction_url = "http://127.0.0.1:31112/function/cross-camera"
+inCamerafunction_url = "http://128.110.217.204:8081/function/in-camera"
+crossCamerafunction_url = "http://128.110.217.204:8081/function/cross-camera"
 
 # Prepare input BBoxes
 bbox_InputList = []
