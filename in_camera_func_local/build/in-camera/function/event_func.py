@@ -125,6 +125,7 @@ class BoundingBox:
         self.frameid = frameid
         self.bbox_image = frame[floor(bbox[1]):ceil(bbox[3]), floor(bbox[0]):ceil(bbox[2])]
         self.bbox = bbox
+        # self.frame = frame.copy()
 
 
 class Tracklet:
@@ -145,7 +146,7 @@ class Tracklet:
 
 class VehicleTracking:
 
-    def __init__(self, max_age=3, min_hits=1):
+    def __init__(self, max_age=30, min_hits=1):
         self.max_age = max_age
         self.mot_tracker = Sort(max_age, min_hits)
         self.tracklets = {}

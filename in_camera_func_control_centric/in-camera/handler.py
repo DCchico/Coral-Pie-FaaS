@@ -91,26 +91,44 @@ def get_previous_frame_state(camera_id, current_frame_id, max_wait_seconds=10):
         (retrieved_object, size_in_bytes)
     """
     try:
+        retrieval_metrics = {
+            "initial_check_time": 0,
+            "pubsub_setup_time": 0,
+            "waiting_time": 0,
+            "final_retrieval_time": 0,
+            "already_available": 0,
+            "wait_cycles": 0,
+            "key_found_after_wait": 0,
+            "timed_out": 0
+        }
+        
         # Calculate the previous frame ID
         prev_frame_id = int(current_frame_id) - 1
         
         # For frame 0 or frame 1, there's no previous state to retrieve
         if prev_frame_id <= 0:
             logging.info(f"No previous state expected for first frame of camera {camera_id}")
-            return None, 0
+            return None, 0, retrieval_metrics
             
         # Key for the previous frame's state
         key = f"incamera:{camera_id}:{prev_frame_id}"
         
         # First, check if it's already available
+        initial_check_start = time.time()
         serialized_obj = redis_client.get(key)
+        retrieval_metrics["initial_check_time"] = (time.time() - initial_check_start) * 1000  # ms
+        logging.debug(f"Initial check time: {retrieval_metrics['initial_check_time']:.2f}ms")
+        
         if serialized_obj:
+            logging.info(f"Previous frame {prev_frame_id} was immediately available")
             obj = pickle.loads(serialized_obj)
             size = len(serialized_obj)
-            return obj, size
+            retrieval_metrics["already_available"] = 1
+            return obj, size, retrieval_metrics
             
         # If not available, use Redis keyspace notifications to wait for it
         # Create a Redis pubsub object
+        pubsub_setup_start = time.time()
         pubsub = redis_client.pubsub()
         
         # Subscribe to keyspace notifications for this key
@@ -119,36 +137,52 @@ def get_previous_frame_state(camera_id, current_frame_id, max_wait_seconds=10):
         
         # Enable keyspace notifications if not already enabled
         redis_client.config_set('notify-keyspace-events', 'KA')
+        retrieval_metrics["pubsub_setup_time"] = (time.time() - pubsub_setup_start) * 1000  # ms
+        logging.debug(f"PubSub setup time: {retrieval_metrics['pubsub_setup_time']:.2f}ms")
             
         logging.info(f"Waiting for previous frame {prev_frame_id} for camera {camera_id} (max {max_wait_seconds}s)")
         
         # Wait for the key to be created (with timeout)
+        waiting_start = time.time()
         wait_start = time.time()
         while time.time() - wait_start < max_wait_seconds:
-            message = pubsub.get_message(timeout=1.0)
+            retrieval_metrics["wait_cycles"] += 1
+            message = pubsub.get_message(timeout=0.1)
             if message and message['type'] == 'message' and message['data'] == b'set':
                 # Key was created, retrieve it
+                final_retrieval_start = time.time()
                 serialized_obj = redis_client.get(key)
+                retrieval_metrics["final_retrieval_time"] = (time.time() - final_retrieval_start) * 1000  # ms
+                
                 if serialized_obj:
                     obj = pickle.loads(serialized_obj)
                     size = len(serialized_obj)
                     wait_time = time.time() - wait_start
                     logging.info(f"Previous frame {prev_frame_id} became available after {wait_time:.2f}s")
+                    retrieval_metrics["waiting_time"] = (time.time() - waiting_start) * 1000  # ms
+                    retrieval_metrics["key_found_after_wait"] = 1
                     pubsub.unsubscribe()
-                    return obj, size
+                    
+                    logging.debug(f"Full retrieval metrics: {retrieval_metrics}")
+                    return obj, size, retrieval_metrics
             
             # Brief sleep to avoid tight loop
             time.sleep(0.01)
         
         # If we get here, we timed out waiting
         pubsub.unsubscribe()
+        retrieval_metrics["waiting_time"] = (time.time() - waiting_start) * 1000  # ms
+        retrieval_metrics["timed_out"] = 1
         logging.warning(f"Timed out waiting for previous frame {prev_frame_id} for camera {camera_id}")
-        return None, 0
+        
+        logging.debug(f"Timed out retrieval metrics: {retrieval_metrics}")
+        return None, 0, retrieval_metrics
         
     except Exception as e:
         logging.error(f"Redis retrieval error: {e}")
         raise
 
+'''
 def clean_old_states(camera_id, current_frame_id, keep_frames=5):
     """Clean up old states, keeping only the most recent few frames"""
     try:
@@ -168,6 +202,7 @@ def clean_old_states(camera_id, current_frame_id, keep_frames=5):
         logging.error(f"Redis cleanup error: {e}")
         # Don't fail the main processing if cleanup fails
         pass
+'''
 
 def handle(req, context):
     global tgraph, vt
@@ -178,6 +213,7 @@ def handle(req, context):
     metrics = {
         "timings": {},
         "sizes": {},
+        "retrieval_details": {},
     }
     
     logging.info("Handler invoked at %s", time.strftime("%Y-%m-%d %H:%M:%S"))
@@ -317,19 +353,31 @@ def handle(req, context):
         
         # Retrieve the VehicleTracking object from the previous frame
         start_download_time = time.time()
-        retrieved_vt, size_bytes = get_previous_frame_state(camera_id, frame_id)
+        retrieved_vt, size_bytes, retrieval_details = get_previous_frame_state(camera_id, frame_id)
         retrieved_size_kb = size_bytes / 1024.0
         end_download_time = time.time()
         download_time = end_download_time - start_download_time
         
-        if retrieved_vt:
-            logging.info(f"Retrieved state from previous frame {frame_id-1} for camera {camera_id}, size: {retrieved_size_kb:.2f} KB")
-            logging.info(f"Number of tracked vehicles: {len(retrieved_vt.tracklets)}")
-            vt = retrieved_vt
-        else:
-            logging.info(f"No previous state found for camera {camera_id}, frame {frame_id}")
-            # For frame 1 or if previous frame state not found, use fresh VehicleTracking
-            retrieved_size_kb = 0
+        # Debug output to verify metrics are populated
+        logging.info(f"Retrieval details: {retrieval_details}")
+        
+        # Store detailed retrieval metrics in proper nested structure
+        metrics["retrieval_details"] = {
+            "retrieval": retrieval_details
+        }
+        
+        # Log more specific information about the retrieval process
+        if retrieval_details:
+            if retrieval_details.get("already_available", False):
+                logging.info(f"Frame was immediately available. Initial check: {retrieval_details.get('initial_check_time', 0):.2f}ms")
+            elif retrieval_details.get("key_found_after_wait", False):
+                logging.info(f"Frame was found after waiting. Setup: {retrieval_details.get('pubsub_setup_time', 0):.2f}ms, " +
+                             f"Wait: {retrieval_details.get('waiting_time', 0):.2f}ms, " +
+                             f"Final retrieval: {retrieval_details.get('final_retrieval_time', 0):.2f}ms, " +
+                             f"Wait cycles: {retrieval_details.get('wait_cycles', 0)}")
+            elif retrieval_details.get("timed_out", False):
+                logging.info(f"Timed out waiting for frame. Setup: {retrieval_details.get('pubsub_setup_time', 0):.2f}ms, " +
+                             f"Wait time: {retrieval_details.get('waiting_time', 0):.2f}ms")
 
         logging.info(f"State retrieval time: {download_time:.6f} seconds")
 
@@ -357,15 +405,18 @@ def handle(req, context):
         metrics["timings"]["image_decoding"] = sort_start - decode_start
         metrics["sizes"]["image_kb"] = len(decoded_image) / 1024.0
         
+        # Use retrieved or create new if not found
+        current_vt = retrieved_vt if retrieved_vt else VehicleTracking()
+        
         # Process bboxes for tracking
-        trackers = vt.sort_update(np.asarray(bboxes))
+        trackers = current_vt.sort_update(np.asarray(bboxes))
         
         # --- TIMING: Status update ---
         status_start = time.time()
         metrics["timings"]["sort_update"] = status_start - sort_start
         
         # Update status with camera ID, frame ID, and frame
-        status = vt.status_update(tgraph, camera_id, frame_id, image)
+        status = current_vt.status_update(tgraph, camera_id, frame_id, image)
         
         # --- TIMING: Process leaving vehicles ---
         leaving_feature_start = time.time()
@@ -411,7 +462,7 @@ def handle(req, context):
         start_upload_time = time.time()
         
         # Store the current frame's state
-        success, size_bytes = store_frame_state(camera_id, frame_id, vt)
+        success, size_bytes = store_frame_state(camera_id, frame_id, current_vt)
         stored_size_kb = size_bytes / 1024.0
             
         end_upload_time = time.time()
@@ -421,7 +472,7 @@ def handle(req, context):
         logging.info(f"State storage time: {upload_time:.6f} seconds")
         
         # Clean up old states (keep last 5 frames)
-        clean_old_states(camera_id, frame_id, keep_frames=5)
+        # clean_old_states(camera_id, frame_id, keep_frames=5)
 
         # --- TIMING: Cleanup ---
         cleanup_start = time.time()
@@ -447,13 +498,16 @@ def handle(req, context):
         response_data["processing_time"] = latency
         response_data["storage_type"] = "redis"
         
-        # Add detailed metrics
+        # Add detailed metrics correctly structured
         metrics["timings"]["response_prep"] = time.time() - response_start
         metrics["timings"]["total"] = latency
         metrics["sizes"]["retrieved_kb"] = retrieved_size_kb
         metrics["sizes"]["stored_kb"] = stored_size_kb
         
         response_data["detailed_metrics"] = metrics
+        
+        # Also include it at top level for flexibility
+        response_data["retrieval_metrics"] = retrieval_details
         
         # Return the final response
         response = {

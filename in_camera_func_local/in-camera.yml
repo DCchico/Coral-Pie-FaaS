@@ -6,7 +6,7 @@ functions:
   in-camera:
     lang: python3-http
     handler: ./in-camera
-    image: dcchico/in-camera:latest
+    image: dcchico/in-camera-local:latest
     environment:
       MINIO_ADDR: "128.110.217.193:9002"
       MINIO_ACCESS_KEY: "Bt0NbjOaRw9ucFcM5Xq8"

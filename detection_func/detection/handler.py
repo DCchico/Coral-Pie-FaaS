@@ -38,8 +38,7 @@ def handle(event, context):
         top_k = 10
         bboxes = []
         for i in range(top_k):
-            if labels[i] == 'car':
-                bboxes.append(prediction["boxes"][i].tolist())
+            bboxes.append(prediction["boxes"][i].tolist())
         
         # Count and clear model loading time measurement
         model_loading_time = (end_model_loading - start_model_loading) * 1000.0

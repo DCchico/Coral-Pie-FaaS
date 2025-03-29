@@ -5,3 +5,4 @@ gremlinpython
 minio
 jsonpickle
 numpy
+redis
