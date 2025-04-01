@@ -1,0 +1,13 @@
+version: 1.0
+provider:
+  name: openfaas
+  gateway: http://128.110.217.204:8081
+functions:
+  in-camera:
+    lang: python3-http
+    handler: ./in-camera
+    image: dcchico/in-camera:latest
+    environment:
+      MINIO_ADDR: "128.110.217.193:9002"
+      MINIO_ACCESS_KEY: "Bt0NbjOaRw9ucFcM5Xq8"
+      MINIO_SECRET_KEY: "hlWkw9zuxOzxlExv2tpn7LkL1qtFTiddWU0PEfb9"
