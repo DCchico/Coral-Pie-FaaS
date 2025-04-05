@@ -64,18 +64,26 @@ def get_size_kb(obj):
 # redis_client = redis.Redis(...)
 camera_states = {}  # Dictionary to track shared memory states by camera
 
-def store_frame_state(camera_id, frame_id, tracking_obj):
-    """Store state for a specific camera and frame using shared memory"""
-    try:
-        store_metrics = {
-            "pickle_time": 0,
-            "memory_write_time": 0,
-            "header_write_time": 0,
-            "obj_size_before": 0,
-            "serialized_size": 0
-        }
+def store_frame_state(camera_id, frame_id, tracking_obj, mode="shared_memory"):
+    """Store state for a specific camera and frame"""
+    global camera_states, vt  # Add this line to explicitly declare global access
+    
+    # Default metrics structure
+    store_metrics = {
+        "pickle_time": 0,
+        "memory_write_time": 0,
+        "header_write_time": 0,
+        "obj_size_before": 0,
+        "serialized_size": 0
+    }
+    
+    if mode == "direct":
+        # In direct mode, we don't actually store anything
+        vt = tracking_obj
+        return True, 0, store_metrics
         
-        # Get or create shared memory
+    # Original shared memory implementation
+    try:
         if camera_id not in camera_states:
             try:
                 shm = shared_memory.SharedMemory(
@@ -128,26 +136,38 @@ def store_frame_state(camera_id, frame_id, tracking_obj):
         logging.error(f"Error storing frame state: {e}")
         return False, 0, {}
 
-def get_previous_frame_state(camera_id, current_frame_id, max_wait_seconds=10):
-    """Get state from the previous frame using shared memory"""
-    try:
-        retrieval_metrics = {
-            "direct_access": 1,
-            "wait_required": 0,
-            "already_available": 0,
-            "timed_out": 0
-        }
+def get_previous_frame_state(camera_id, current_frame_id, mode="shared_memory", max_wait_seconds=10):
+    """Get state from the previous frame"""
+    global camera_states
+    
+    # Default metrics structure
+    retrieval_metrics = {
+        "direct_access": 1,
+        "wait_required": 0,
+        "already_available": 0,
+        "timed_out": 0
+    }
+    
+    if mode == "direct":
+        # In direct mode, return the global vt object
+        global vt
+        return vt, 0, retrieval_metrics
         
+    # Original shared memory implementation
+    try:
         prev_frame_id = int(current_frame_id) - 1
-        if prev_frame_id <= 0:
+        if prev_frame_id < 0:
             return None, 0, retrieval_metrics
             
         # Get or connect to shared memory
         if camera_id not in camera_states:
             try:
-                shm = shared_memory.SharedMemory(name=f"vt_camera_{camera_id}")
+                # Only try to connect, don't create
+                shm = shared_memory.SharedMemory(name=f"vt_camera_{camera_id}", create=False)
                 camera_states[camera_id] = shm
             except FileNotFoundError:
+                # This is expected if store_frame_state hasn't been called yet
+                logging.info(f"No shared memory found for camera {camera_id}")
                 return None, 0, retrieval_metrics
         else:
             shm = camera_states[camera_id]
@@ -197,6 +217,11 @@ def handle(req, context):
     """
     Handler function that processes vehicle tracking from images
     """
+    # Get state handling mode from header
+    state_mode = "shared_memory"  # default
+    if hasattr(req, 'headers'):
+        state_mode = req.headers.get('state-location', 'shared_memory')
+    
     # Start total time measurement
     total_start_time = time.time()
     pre_state_start_time = time.time()
@@ -207,7 +232,7 @@ def handle(req, context):
         "pre_state_processing": 0,
         "post_state_processing": 0,
         "state_handling": {
-            "level": "L2",  # Since we're using shared memory
+            "level": "L2" if state_mode == "shared_memory" else "L1",
             "process_time": 0,
             "idle_time": 0
         }
@@ -244,7 +269,11 @@ def handle(req, context):
         elif hasattr(req, 'body'):
             # OpenFaaS format
             logging.info("OpenFaaS request format detected")
-            body_str = req.body.decode('utf-8') if isinstance(req.body, bytes) else str(req.body)
+            if isinstance(req.body, bytes):
+                body_str = req.body.decode('utf-8') 
+            else:
+                body_str = str(req.body)
+                
         elif isinstance(req, bytes):
             # Raw bytes
             logging.info("Raw bytes request format detected")
@@ -257,7 +286,8 @@ def handle(req, context):
             # Assume it can be converted to string
             logging.info("Unknown request format, attempting string conversion")
             body_str = str(req)
-            
+        
+
         # Parse JSON
         try:
             input_data = json.loads(body_str)
@@ -286,6 +316,8 @@ def handle(req, context):
         try:
             frame_id = int(input_data.get('frame_id'))
             logging.info(f"Processing frame {frame_id} for camera {camera_id}")
+        
+                
         except (ValueError, TypeError) as e:
             logging.error("Invalid frame_id: %s", str(e))
             return {
@@ -339,7 +371,6 @@ def handle(req, context):
                 "body": json.dumps(response_data)  # Use regular json for test mode
             }
             return response
-
         # --- TIMING: Initialization ---
         init_start = time.time()
         metrics["timings"]["validation"] = init_start - validation_start
@@ -351,6 +382,7 @@ def handle(req, context):
             vt = VehicleTracking()
             coldstart(tgraph)
         
+
         # --- TIMING: Image decoding (moved up) ---
         decode_start = time.time()
         metrics["timings"]["initialization"] = decode_start - init_start
@@ -375,12 +407,48 @@ def handle(req, context):
         pre_state_end_time = time.time()
         state_handling_start = time.time()
 
+
         # --- TIMING: State retrieval ---
         retrieve_start = time.time()
         
         # Retrieve the VehicleTracking object from the previous frame
         start_download_time = time.time()
-        retrieved_vt, size_bytes, retrieval_details = get_previous_frame_state(camera_id, frame_id)
+        retrieved_vt, size_bytes, retrieval_details = get_previous_frame_state(
+            camera_id, 
+            frame_id,
+            mode=state_mode
+        )
+        
+        # Check if retrieved_vt is a valid VehicleTracking object
+        is_valid_vt = False
+        try:
+            if retrieved_vt is not None:
+                # Check if it's the correct class type
+                if isinstance(retrieved_vt, VehicleTracking):
+                    # Verify it has the expected methods/attributes
+                    if hasattr(retrieved_vt, 'sort_update') and hasattr(retrieved_vt, 'status_update'):
+                        is_valid_vt = True
+                    else:
+                        # It's the right class but missing methods (corrupted object)
+                       return {
+                        "statusCode": 400,
+                        "body": json.dumps({"error": f"----------------------------------Retrieved VehicleTracking object is missing expected methods"})
+                       }
+                else:
+                    return {
+                        "statusCode": 400,
+                        "body": json.dumps({"error": f"----------------------------------Retrieved object is not a VehicleTracking instance but {type(retrieved_vt)}"})
+                    }
+        except Exception as e:
+            return {
+                "statusCode": 400,
+                "body": json.dumps({"error": f"----------------------------------Error validating retrieved VehicleTracking object: {e}"})
+            }
+        
+        # Use global vt if retrieved_vt is not valid
+        # current_vt = retrieved_vt if is_valid_vt else vt
+        
+        
         retrieved_size_kb = size_bytes / 1024.0
         end_download_time = time.time()
         download_time = end_download_time - start_download_time
@@ -419,17 +487,43 @@ def handle(req, context):
         sort_start = time.time()
         
         # Use retrieved or create new if not found
-        current_vt = retrieved_vt if retrieved_vt else VehicleTracking()
-        
-        # Process bboxes for tracking
-        trackers = current_vt.sort_update(np.asarray(bboxes))
+        current_vt = retrieved_vt if retrieved_vt else vt
+
+        # Process bboxes for tracking with specific error handling
+        trackers = current_vt.sort_update(bboxes)
+                # Add debug for frame 10# Add debug for frame 10
         
         # --- TIMING: Status update ---
         status_start = time.time()
         metrics["timings"]["sort_update"] = status_start - sort_start
-        
+        '''        
+        if frame_id == 10:
+            # Get key state information from vt object
+            debug_info = {
+                "error": "Frame 10 VT State Debug",
+                "tracklets_count": len(vt.tracklets),
+                "trackers_shape": vt.trackers.shape if hasattr(vt, 'trackers') and isinstance(vt.trackers, np.ndarray) else 'no trackers/not array',
+                "trackers_values": vt.trackers.tolist() if hasattr(vt, 'trackers') and isinstance(vt.trackers, np.ndarray) else 'no trackers',
+                "mot_tracker_max_age": vt.max_age,
+                "mot_frame_count": vt.mot_tracker.frame_count if hasattr(vt.mot_tracker, 'frame_count') else 'no frame_count',
+                "tracklets_info": [
+                    {
+                        "id": tid,
+                        "last_update": t.last_update if hasattr(t, 'last_update') else 'no last_update',
+                        "tracklet_length": len(t.tracklet),
+                        "start_frame": t.start_update if hasattr(t, 'start_update') else 'no start_update'
+                    } 
+                    for tid, t in vt.tracklets.items()
+                ]
+            }
+            return {
+                "statusCode": 400,
+                "body": json.dumps(debug_info)
+            }'''
         # Update status with camera ID, frame ID, and frame
         status = current_vt.status_update(tgraph, camera_id, frame_id, image)
+        
+        
         
         # --- TIMING: State storage (moved up) ---
         storage_start = time.time()
@@ -437,7 +531,12 @@ def handle(req, context):
         
         # Store the current frame's state
         store_start_time = time.time()
-        success, size_bytes, store_metrics = store_frame_state(camera_id, frame_id, current_vt)
+        success, size_bytes, store_metrics = store_frame_state(
+            camera_id, 
+            frame_id, 
+            current_vt,
+            mode=state_mode
+        )
         store_end_time = time.time()
         stored_size_kb = size_bytes / 1024.0
             
@@ -480,6 +579,8 @@ def handle(req, context):
             }
             response_data["entering_vehicles"].append(vertex_info)
         
+        
+
         # --- TIMING: State storage ---
         metrics["timings"]["entering_features"] =  time.time() - entering_feature_start
         
@@ -513,7 +614,7 @@ def handle(req, context):
         response_data["retrieved_size_kb"] = retrieved_size_kb
         response_data["stored_size_kb"] = stored_size_kb
         response_data["processing_time"] = latency
-        response_data["storage_type"] = "shared_memory"
+        response_data["storage_type"] = state_mode
         
         # Add detailed metrics correctly structured
         metrics["timings"]["response_prep"] = time.time() - response_start
@@ -540,8 +641,9 @@ def handle(req, context):
             "pre_state_processing": pre_state_time,
             "post_state_processing": post_state_time,
             "state_handling": {
-                "level": "L2",  # shared memory
+                "level": "L2" if state_mode == "shared_memory" else "L1",
                 "process_time": state_handling_time,
+                "data_transfer": metrics["timings"]["retrieval"] + metrics["timings"]["storage"],
                 "idle_time": idle_time
             }
         })
