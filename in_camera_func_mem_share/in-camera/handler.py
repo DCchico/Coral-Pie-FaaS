@@ -145,7 +145,7 @@ def get_previous_frame_state(camera_id, frame_id, mode="shared_memory", max_wait
     # Default metrics structure
     retrieval_metrics = {
         "direct_access": 0.0,
-        "wait_required": 0.0,
+        "waiting_time": 0.0,
         "already_available": 0.0,
         "timed_out": 0.0
     }
@@ -172,7 +172,7 @@ def get_previous_frame_state(camera_id, frame_id, mode="shared_memory", max_wait
                     
                     if remaining_time <= 0:
                         retrieval_metrics["timed_out"] = 1
-                        retrieval_metrics["wait_required"] = elapsed * 1000  # Convert to ms
+                        retrieval_metrics["waiting_time"] = elapsed * 1000  # Convert to ms
                         return None, 0, retrieval_metrics
                     
                     # Try to acquire the semaphore
@@ -183,7 +183,7 @@ def get_previous_frame_state(camera_id, frame_id, mode="shared_memory", max_wait
                         if total_wait < 0.001:
                             retrieval_metrics["already_available"] = 1
                         else:
-                            retrieval_metrics["wait_required"] = total_wait * 1000
+                            retrieval_metrics["waiting_time"] = total_wait * 1000
                         
                         # Help cleanup previous frame's semaphore
                         try:
@@ -193,7 +193,7 @@ def get_previous_frame_state(camera_id, frame_id, mode="shared_memory", max_wait
                         break
                     except posix_ipc.BusyError:  # This is raised on timeout
                         retrieval_metrics["timed_out"] = 1
-                        retrieval_metrics["wait_required"] = max_wait_seconds * 1000
+                        retrieval_metrics["waiting_time"] = max_wait_seconds * 1000
                         return None, 0, retrieval_metrics
                         
                 except posix_ipc.ExistentialError:
@@ -204,7 +204,7 @@ def get_previous_frame_state(camera_id, frame_id, mode="shared_memory", max_wait
             # If we exit the loop due to timeout
             if (time.time() - wait_start) >= sema_creation_timeout:
                 retrieval_metrics["timed_out"] = 1
-                retrieval_metrics["wait_required"] = sema_creation_timeout * 1000
+                retrieval_metrics["waiting_time"] = sema_creation_timeout * 1000
                 return None, 0, retrieval_metrics
 
         # Create current frame's semaphore
