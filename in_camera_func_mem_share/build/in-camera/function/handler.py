@@ -14,6 +14,7 @@ import pickle
 import sys
 from multiprocessing import shared_memory
 import struct
+import posix_ipc  # Add this import at the top
 
 # Initialize logging with clear format
 logging.basicConfig(
@@ -66,24 +67,29 @@ camera_states = {}  # Dictionary to track shared memory states by camera
 
 def store_frame_state(camera_id, frame_id, tracking_obj, mode="shared_memory"):
     """Store state for a specific camera and frame"""
-    global camera_states, vt  # Add this line to explicitly declare global access
+    global camera_states, vt
     
-    # Default metrics structure
     store_metrics = {
-        "pickle_time": 0,
-        "memory_write_time": 0,
-        "header_write_time": 0,
-        "obj_size_before": 0,
-        "serialized_size": 0
+        "pickle_time": 0.0,
+        "memory_write_time": 0.0,
+        "header_write_time": 0.0,
+        "obj_size_before": 0.0,
+        "serialized_size": 0.0
     }
     
     if mode == "direct":
-        # In direct mode, we don't actually store anything
         vt = tracking_obj
         return True, 0, store_metrics
-        
-    # Original shared memory implementation
+
     try:
+        # Get the semaphore created during read phase
+        sem_name = f"/vt_camera_{camera_id}_frame_{frame_id}_sem"
+        try:
+            sem = posix_ipc.Semaphore(sem_name)
+        except posix_ipc.ExistentialError:
+            return False, 0, {"error": "no_read_semaphore"}
+
+        # Rest of your existing shared memory code...
         if camera_id not in camera_states:
             try:
                 shm = shared_memory.SharedMemory(
@@ -100,95 +106,147 @@ def store_frame_state(camera_id, frame_id, tracking_obj, mode="shared_memory"):
         else:
             shm = camera_states[camera_id]
 
-        # Measure object size before serialization
+        # Your existing metrics and serialization code
         store_metrics["obj_size_before"] = sys.getsizeof(tracking_obj)
-
-        # Time pickle serialization
         pickle_start = time.time()
         serialized = pickle.dumps(tracking_obj)
-        store_metrics["pickle_time"] = (time.time() - pickle_start) * 1000  # Convert to ms
-        
+        store_metrics["pickle_time"] = (time.time() - pickle_start) * 1000
+
         state_size = len(serialized)
         store_metrics["serialized_size"] = state_size
         
-        if state_size > len(shm.buf) - 24:  # Check if it fits
+        if state_size > len(shm.buf) - 24:
             return False, 0, store_metrics
 
-        # Time memory write operations separately
+        # Write data first, then header
         write_start = time.time()
         shm.buf[24:24+state_size] = serialized
-        store_metrics["memory_write_time"] = (time.time() - write_start) * 1000  # Convert to ms
-        
-        # Time header write
+        store_metrics["memory_write_time"] = (time.time() - write_start) * 1000
+
         header_start = time.time()
         shm.buf[:24] = struct.pack("!QQQ", frame_id, state_size, 1)
-        store_metrics["header_write_time"] = (time.time() - header_start) * 1000  # Convert to ms
-        
-        logging.info(f"Store metrics - Pickle: {store_metrics['pickle_time']:.2f}ms, "
-                    f"Memory Write: {store_metrics['memory_write_time']:.2f}ms, "
-                    f"Header Write: {store_metrics['header_write_time']:.2f}ms, "
-                    f"Object Size: {store_metrics['obj_size_before']} bytes, "
-                    f"Serialized Size: {store_metrics['serialized_size']} bytes")
-        
+        store_metrics["header_write_time"] = (time.time() - header_start) * 1000
+
+        # Release semaphore to indicate store is complete
+        store_metrics["semaphore_value_before_release"] = sem.value
+        sem.release()
+        store_metrics["semaphore_value_after_release"] = sem.value
+
         return True, state_size, store_metrics
-                
+
     except Exception as e:
         logging.error(f"Error storing frame state: {e}")
-        return False, 0, {}
+        return False, 0, {"error": str(e)}
 
-def get_previous_frame_state(camera_id, current_frame_id, mode="shared_memory", max_wait_seconds=10):
+def get_previous_frame_state(camera_id, frame_id, mode="shared_memory", max_wait_seconds=10):
     """Get state from the previous frame"""
     global camera_states
     
     # Default metrics structure
     retrieval_metrics = {
-        "direct_access": 1,
-        "wait_required": 0,
-        "already_available": 0,
-        "timed_out": 0
+        "direct_access": 0.0,
+        "wait_required": 0.0,
+        "already_available": 0.0,
+        "timed_out": 0.0
     }
     
     if mode == "direct":
-        # In direct mode, return the global vt object
         global vt
         return vt, 0, retrieval_metrics
-        
-    # Original shared memory implementation
+
     try:
-        prev_frame_id = int(current_frame_id) - 1
-        if prev_frame_id < 0:
-            return None, 0, retrieval_metrics
+        if frame_id > 0:  # Skip for frame 0
+            # Try to open previous frame's semaphore with retries
+            sem_prev_name = f"/vt_camera_{camera_id}_frame_{frame_id-1}_sem"
+            wait_start = time.time()
+            sema_creation_timeout = 10  # 10 seconds timeout for semaphore creation
             
+            while (time.time() - wait_start) < max_wait_seconds:
+                try:
+                    sem_prev = posix_ipc.Semaphore(sem_prev_name)
+                    # If we get here, semaphore exists
+                    
+                    # Try to acquire with remaining time from max_wait_seconds
+                    elapsed = time.time() - wait_start
+                    remaining_time = max_wait_seconds - elapsed
+                    
+                    if remaining_time <= 0:
+                        retrieval_metrics["timed_out"] = 1
+                        retrieval_metrics["wait_required"] = elapsed * 1000  # Convert to ms
+                        return None, 0, retrieval_metrics
+                    
+                    # Try to acquire the semaphore
+                    try:
+                        sem_prev.acquire(timeout=remaining_time)  # Returns None on success, raises exception on failure/timeout
+                        # Successfully acquired if we get here
+                        total_wait = time.time() - wait_start
+                        if total_wait < 0.001:
+                            retrieval_metrics["already_available"] = 1
+                        else:
+                            retrieval_metrics["wait_required"] = total_wait * 1000
+                        
+                        # Help cleanup previous frame's semaphore
+                        try:
+                            sem_prev.unlink()
+                        except:
+                            return None, 0, {"error": "semaphore_cleanup_error", **retrieval_metrics}
+                        break
+                    except posix_ipc.BusyError:  # This is raised on timeout
+                        retrieval_metrics["timed_out"] = 1
+                        retrieval_metrics["wait_required"] = max_wait_seconds * 1000
+                        return None, 0, retrieval_metrics
+                        
+                except posix_ipc.ExistentialError:
+                    # Semaphore doesn't exist yet, wait a bit and retry
+                    time.sleep(0.01)  # 10ms sleep
+                    continue
+                
+            # If we exit the loop due to timeout
+            if (time.time() - wait_start) >= sema_creation_timeout:
+                retrieval_metrics["timed_out"] = 1
+                retrieval_metrics["wait_required"] = sema_creation_timeout * 1000
+                return None, 0, retrieval_metrics
+
+        # Create current frame's semaphore
+        sem_current_name = f"/vt_camera_{camera_id}_frame_{frame_id}_sem"
+        try:
+            sem_current = posix_ipc.Semaphore(sem_current_name, posix_ipc.O_CREAT | posix_ipc.O_EXCL, initial_value=0)
+        except posix_ipc.ExistentialError:
+            return None, 0, {"error": "concurrent_read_attempt", **retrieval_metrics}
+
+        if frame_id == 0:
+            return None, 0, retrieval_metrics
         # Get or connect to shared memory
         if camera_id not in camera_states:
             try:
-                # Only try to connect, don't create
                 shm = shared_memory.SharedMemory(name=f"vt_camera_{camera_id}", create=False)
                 camera_states[camera_id] = shm
             except FileNotFoundError:
-                # This is expected if store_frame_state hasn't been called yet
-                logging.info(f"No shared memory found for camera {camera_id}")
-                return None, 0, retrieval_metrics
-        else:
-            shm = camera_states[camera_id]
-            
+                sem_current.unlink()  # Cleanup if shm connection fails
+                return None, 0, {"error": "no_shared_memory", **retrieval_metrics}
+
+        shm = camera_states[camera_id]
+        
         # Read header
         header = bytes(shm.buf[:24])
-        frame_id, state_size, valid = struct.unpack("!QQQ", header)
+        current_frame, state_size, valid = struct.unpack("!QQQ", header)
         
-        if valid == 1 and frame_id == prev_frame_id:
-            # Read and deserialize state
+        if valid != 1 or current_frame != frame_id - 1:
+            sem_current.unlink()  # Cleanup if invalid state
+            return None, 0, {"error": "invalid_or_wrong_frame", **retrieval_metrics}
+
+        # Read and deserialize state
+        try:
             serialized = bytes(shm.buf[24:24+state_size])
             state = pickle.loads(serialized)
-            retrieval_metrics["already_available"] = 1
             return state, state_size, retrieval_metrics
-            
-        retrieval_metrics["timed_out"] = 0
-        return None, 0, retrieval_metrics
-        
+        except Exception as e:
+            sem_current.unlink()  # Cleanup if deserialization fails
+            raise
+
     except Exception as e:
         logging.error(f"Error retrieving frame state: {e}")
-        return None, 0, retrieval_metrics
+        return None, 0, {"error": str(e), **retrieval_metrics}
 
 '''
 def clean_old_states(camera_id, current_frame_id, keep_frames=5):
@@ -238,11 +296,12 @@ def handle(req, context):
         }
     }
 
-    # Keep existing metrics structure
+    # Initialize metrics dictionary
     metrics = {
         "timings": {},
         "sizes": {},
         "retrieval_details": {},
+        "store_details": {}
     }
 
     logging.info("Handler invoked at %s", time.strftime("%Y-%m-%d %H:%M:%S"))
@@ -416,7 +475,8 @@ def handle(req, context):
         retrieved_vt, size_bytes, retrieval_details = get_previous_frame_state(
             camera_id, 
             frame_id,
-            mode=state_mode
+            mode=state_mode,
+            max_wait_seconds=10
         )
         
         # Check if retrieved_vt is a valid VehicleTracking object

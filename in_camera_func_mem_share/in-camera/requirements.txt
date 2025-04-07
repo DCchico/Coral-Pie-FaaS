@@ -5,4 +5,5 @@ gremlinpython
 minio
 jsonpickle
 numpy
+posix-ipc
 # redis  # You can comment this out if you're fully replacing Redis
