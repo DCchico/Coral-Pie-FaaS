@@ -21,6 +21,10 @@ end_model_loading = time.time()
 
 def handle(event, context):
     global start_model_loading, end_model_loading
+    
+    # Start total time measurement at the very beginning
+    total_start_time = time.time()
+    
     try:
         # Parse input JSON first
         if isinstance(event.body, bytes):
@@ -79,15 +83,38 @@ def handle(event, context):
             "bboxes": bboxes
         }
 
-        # Just return the JSON string, let OpenFaaS handle the encoding
+        # Calculate total processing time at the end
+        end_time = time.time()
+        total_time = end_time - total_start_time
+
+        # Create monitoring metrics structure
+        monitoring_metrics = {
+            "total_time": total_time,
+            "pre_state_processing": 0,  # Always 0 for stateless function
+            "post_state_processing": 0,  # Always 0 for stateless function
+        }
+
+        # Convert metrics to JSON string for header
+        metrics_json = json.dumps(monitoring_metrics)
+
+        # Return response with metrics in header
         return {
             "statusCode": 200,
             "body": json.dumps(in_camera_input),
             "headers": {
-                "Content-Type": "application/json"
+                "Content-Type": "application/json",
+                "X-Function-Metrics": metrics_json  # Add metrics to header
             }
         }
     except Exception as e:
+        # Add metrics even in error case
+        end_time = time.time()
+        error_metrics = {
+            "total_time": end_time - total_start_time,
+            "pre_state_processing": 0,
+            "post_state_processing": 0,
+        }
+        
         error_response = {
             "error": f"Internal Server Error: {str(e)}"
         }
@@ -95,7 +122,8 @@ def handle(event, context):
             "statusCode": 500,
             "body": json.dumps(error_response),
             "headers": {
-                "Content-Type": "application/json"
+                "Content-Type": "application/json",
+                "X-Function-Metrics": json.dumps(error_metrics)
             }
         }
 
