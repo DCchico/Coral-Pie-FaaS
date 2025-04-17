@@ -26,9 +26,6 @@ logging.basicConfig(
 # Global variables for initialization
 tgraph = None
 vt = None
-tgraph = TrajectoryGraph()
-vt = VehicleTracking()
-coldstart(tgraph)
 
 # Replace Redis imports
 # import redis
@@ -138,9 +135,9 @@ def store_frame_state(camera_id, frame_id, tracking_obj, mode="shared_memory"):
         logging.error(f"Error storing frame state: {e}")
         return False, 0, {"error": str(e)}
 
-def get_previous_frame_state(camera_id, frame_id, mode="shared_memory", max_wait_seconds=10):
+def get_previous_frame_state(camera_id, frame_id, mode="shared_memory", dependent_mode="", max_wait_seconds=10):
     """Get state from the previous frame"""
-    global camera_states
+    global camera_states, vt
     
     # Default metrics structure
     retrieval_metrics = {
@@ -151,61 +148,63 @@ def get_previous_frame_state(camera_id, frame_id, mode="shared_memory", max_wait
     }
     
     if mode == "direct":
-        global vt
         return vt, 0, retrieval_metrics
 
     try:
         if frame_id > 0:  # Skip for frame 0
-            # Try to open previous frame's semaphore with retries
-            sem_prev_name = f"/vt_camera_{camera_id}_frame_{frame_id-1}_sem"
-            wait_start = time.time()
-            sema_creation_timeout = 10  # 10 seconds timeout for semaphore creation
-            
-            while (time.time() - wait_start) < max_wait_seconds:
-                try:
-                    sem_prev = posix_ipc.Semaphore(sem_prev_name)
-                    # If we get here, semaphore exists
-                    
-                    # Try to acquire with remaining time from max_wait_seconds
-                    elapsed = time.time() - wait_start
-                    remaining_time = max_wait_seconds - elapsed
-                    
-                    if remaining_time <= 0:
-                        retrieval_metrics["timed_out"] = 1
-                        retrieval_metrics["waiting_time"] = elapsed * 1000  # Convert to ms
-                        return None, 0, retrieval_metrics
-                    
-                    # Try to acquire the semaphore
-                    try:
-                        sem_prev.acquire(timeout=remaining_time)  # Returns None on success, raises exception on failure/timeout
-                        # Successfully acquired if we get here
-                        total_wait = time.time() - wait_start
-                        if total_wait < 0.001:
-                            retrieval_metrics["already_available"] = 1
-                        else:
-                            retrieval_metrics["waiting_time"] = total_wait * 1000
-                        
-                        # Help cleanup previous frame's semaphore
-                        try:
-                            sem_prev.unlink()
-                        except:
-                            return None, 0, {"error": "semaphore_cleanup_error", **retrieval_metrics}
-                        break
-                    except posix_ipc.BusyError:  # This is raised on timeout
-                        retrieval_metrics["timed_out"] = 1
-                        retrieval_metrics["waiting_time"] = max_wait_seconds * 1000
-                        return None, 0, retrieval_metrics
-                        
-                except posix_ipc.ExistentialError:
-                    # Semaphore doesn't exist yet, wait a bit and retry
-                    time.sleep(0.01)  # 10ms sleep
-                    continue
+            if dependent_mode == "direct":
+                pass
+            else:
+                # Try to open previous frame's semaphore with retries
+                sem_prev_name = f"/vt_camera_{camera_id}_frame_{frame_id-1}_sem"
+                wait_start = time.time()
+                sema_creation_timeout = 10  # 10 seconds timeout for semaphore creation
                 
-            # If we exit the loop due to timeout
-            if (time.time() - wait_start) >= sema_creation_timeout:
-                retrieval_metrics["timed_out"] = 1
-                retrieval_metrics["waiting_time"] = sema_creation_timeout * 1000
-                return None, 0, retrieval_metrics
+                while (time.time() - wait_start) < max_wait_seconds:
+                    try:
+                        sem_prev = posix_ipc.Semaphore(sem_prev_name)
+                        # If we get here, semaphore exists
+                        
+                        # Try to acquire with remaining time from max_wait_seconds
+                        elapsed = time.time() - wait_start
+                        remaining_time = max_wait_seconds - elapsed
+                        
+                        if remaining_time <= 0:
+                            retrieval_metrics["timed_out"] = 1
+                            retrieval_metrics["waiting_time"] = elapsed * 1000  # Convert to ms
+                            return None, 0, retrieval_metrics
+                        
+                        # Try to acquire the semaphore
+                        try:
+                            sem_prev.acquire(timeout=remaining_time)  # Returns None on success, raises exception on failure/timeout
+                            # Successfully acquired if we get here
+                            total_wait = time.time() - wait_start
+                            if total_wait < 0.001:
+                                retrieval_metrics["already_available"] = 1
+                            else:
+                                retrieval_metrics["waiting_time"] = total_wait * 1000
+                            
+                            # Help cleanup previous frame's semaphore
+                            try:
+                                sem_prev.unlink()
+                            except:
+                                return None, 0, {"error": "semaphore_cleanup_error", **retrieval_metrics}
+                            break
+                        except posix_ipc.BusyError:  # This is raised on timeout
+                            retrieval_metrics["timed_out"] = 1
+                            retrieval_metrics["waiting_time"] = max_wait_seconds * 1000
+                            return None, 0, retrieval_metrics
+                            
+                    except posix_ipc.ExistentialError:
+                        # Semaphore doesn't exist yet, wait a bit and retry
+                        time.sleep(0.01)  # 10ms sleep
+                        continue
+                    
+                # If we exit the loop due to timeout
+                if (time.time() - wait_start) >= sema_creation_timeout:
+                    retrieval_metrics["timed_out"] = 1
+                    retrieval_metrics["waiting_time"] = sema_creation_timeout * 1000
+                    return None, 0, retrieval_metrics
 
         # Create current frame's semaphore
         sem_current_name = f"/vt_camera_{camera_id}_frame_{frame_id}_sem"
@@ -216,6 +215,10 @@ def get_previous_frame_state(camera_id, frame_id, mode="shared_memory", max_wait
 
         if frame_id == 0:
             return None, 0, retrieval_metrics
+
+        if dependent_mode == "direct":
+            return vt, 0, retrieval_metrics
+
         # Get or connect to shared memory
         if camera_id not in camera_states:
             try:
@@ -224,7 +227,7 @@ def get_previous_frame_state(camera_id, frame_id, mode="shared_memory", max_wait
             except FileNotFoundError:
                 sem_current.unlink()  # Cleanup if shm connection fails
                 return None, 0, {"error": "no_shared_memory", **retrieval_metrics}
-
+        
         shm = camera_states[camera_id]
         
         # Read header
@@ -277,8 +280,10 @@ def handle(req, context):
     """
     # Get state handling mode from header
     state_mode = "shared_memory"  # default
+    dependent_state_mode = ""
     if hasattr(req, 'headers'):
         state_mode = req.headers.get('state-location', 'shared_memory')
+        dependent_state_mode = req.headers.get('dependent-state-location', '')
     
     # Start total time measurement
     total_start_time = time.time()
@@ -441,7 +446,6 @@ def handle(req, context):
             vt = VehicleTracking()
             coldstart(tgraph)
         
-
         # --- TIMING: Image decoding (moved up) ---
         decode_start = time.time()
         metrics["timings"]["initialization"] = decode_start - init_start
@@ -469,16 +473,16 @@ def handle(req, context):
 
         # --- TIMING: State retrieval ---
         retrieve_start = time.time()
-        
+
         # Retrieve the VehicleTracking object from the previous frame
         start_download_time = time.time()
         retrieved_vt, size_bytes, retrieval_details = get_previous_frame_state(
             camera_id, 
             frame_id,
             mode=state_mode,
+            dependent_mode=dependent_state_mode,
             max_wait_seconds=10
         )
-        
         # Check if retrieved_vt is a valid VehicleTracking object
         is_valid_vt = False
         try:

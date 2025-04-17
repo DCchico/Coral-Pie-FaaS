@@ -26,9 +26,6 @@ logging.basicConfig(
 # Global variables for initialization
 tgraph = None
 vt = None
-tgraph = TrajectoryGraph()
-vt = VehicleTracking()
-coldstart(tgraph)
 
 # Replace Redis imports
 # import redis
@@ -449,7 +446,6 @@ def handle(req, context):
             vt = VehicleTracking()
             coldstart(tgraph)
         
-
         # --- TIMING: Image decoding (moved up) ---
         decode_start = time.time()
         metrics["timings"]["initialization"] = decode_start - init_start
@@ -477,7 +473,7 @@ def handle(req, context):
 
         # --- TIMING: State retrieval ---
         retrieve_start = time.time()
-        
+
         # Retrieve the VehicleTracking object from the previous frame
         start_download_time = time.time()
         retrieved_vt, size_bytes, retrieval_details = get_previous_frame_state(
@@ -487,7 +483,6 @@ def handle(req, context):
             dependent_mode=dependent_state_mode,
             max_wait_seconds=10
         )
-        
         # Check if retrieved_vt is a valid VehicleTracking object
         is_valid_vt = False
         try:
