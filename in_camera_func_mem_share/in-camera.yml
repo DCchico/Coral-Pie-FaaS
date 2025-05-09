@@ -6,7 +6,7 @@ functions:
   in-camera:
     lang: python3-http
     handler: ./in-camera
-    image: dcchico/in-camera-mem-share:latest
+    image: dcchico/in-camera-mem-share-large:latest
     environment:
       REDIS_ADDR: "128.110.217.193"
       JANUS_ADDR: "128.110.217.193"
