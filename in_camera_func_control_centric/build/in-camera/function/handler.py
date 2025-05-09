@@ -145,29 +145,34 @@ def get_previous_frame_state(camera_id, current_frame_id, max_wait_seconds=10):
         # Wait for the key to be created (with timeout)
         waiting_start = time.time()
         wait_start = time.time()
+        serial_obj = None
         while time.time() - wait_start < max_wait_seconds:
             retrieval_metrics["wait_cycles"] += 1
             message = pubsub.get_message(timeout=0.1)
             if message and message['type'] == 'message' and message['data'] == b'set':
                 # Key was created, retrieve it
+                retrieval_metrics["waiting_time"] = (time.time() - waiting_start) * 1000  # ms
                 final_retrieval_start = time.time()
                 serialized_obj = redis_client.get(key)
                 retrieval_metrics["final_retrieval_time"] = (time.time() - final_retrieval_start) * 1000  # ms
-                
+            else:
+                final_retrieval_start = time.time()
+                serialized_obj = redis_client.get(key)
                 if serialized_obj:
-                    obj = pickle.loads(serialized_obj)
-                    size = len(serialized_obj)
-                    wait_time = time.time() - wait_start
-                    logging.info(f"Previous frame {prev_frame_id} became available after {wait_time:.2f}s")
-                    retrieval_metrics["waiting_time"] = (time.time() - waiting_start) * 1000  # ms
-                    retrieval_metrics["key_found_after_wait"] = 1
-                    pubsub.unsubscribe()
-                    
-                    logging.debug(f"Full retrieval metrics: {retrieval_metrics}")
-                    return obj, size, retrieval_metrics
+                    retrieval_metrics["final_retrieval_time"] = (time.time() - final_retrieval_start) * 1000  # ms
+                    retrieval_metrics["waiting_time"] = (time.time() - waiting_start - retrieval_metrics["final_retrieval_time"]/1000) * 1000  # ms
+                
+            if serialized_obj:
+                obj = pickle.loads(serialized_obj)
+                size = len(serialized_obj)
+                wait_time = time.time() - wait_start
+                logging.info(f"Previous frame {prev_frame_id} became available after {wait_time:.2f}s")
+                retrieval_metrics["key_found_after_wait"] = 1
+                pubsub.unsubscribe()
+                
+                logging.debug(f"Full retrieval metrics: {retrieval_metrics}")
+                return obj, size, retrieval_metrics
             
-            # Brief sleep to avoid tight loop
-            time.sleep(0.01)
         
         # If we get here, we timed out waiting
         pubsub.unsubscribe()
