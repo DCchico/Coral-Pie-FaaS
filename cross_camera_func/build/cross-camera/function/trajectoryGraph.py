@@ -14,6 +14,8 @@ from gremlin_python.process.traversal import (Barrier, Bindings, Cardinality,
                                               Order, P, Pop, Scope, T,
                                               WithOptions)
 from gremlin_python.structure.graph import Graph
+from gremlin_python.driver.serializer import GraphSONMessageSerializer
+from gremlin_python.driver.protocol import GremlinServerError
 
 
 class TrajectoryGraph:
@@ -33,31 +35,53 @@ class TrajectoryGraph:
     def __init__( self ):
         self.b = Bindings()
         self.graph = Graph()
-        self.connection = DriverRemoteConnection('ws://10.100.1.239:8182/gremlin','g')
+        janus_addr = os.environ.get("JANUS_ADDR", "128.110.217.239")
+        
+        # Import the proper serializer
+        from gremlin_python.driver.serializer import GraphSONMessageSerializer
+        from gremlin_python.driver.protocol import GremlinServerError
+        
+        # Create a serializer instance
+        serializer = GraphSONMessageSerializer()
+        
+        # Use the serializer instance in the connection
+        self.connection = DriverRemoteConnection(
+            f'ws://{janus_addr}:8182/gremlin',
+            'g',
+            message_serializer=serializer
+        )
         self.g = self.graph.traversal().withRemote(self.connection)
-        logging.info("Connected")
+        logging.info(f"Connected to JanusGraph at {janus_addr} using GraphSON serializer")
     
     def addDetection(self, vehId, camId, timestamp, index):
-        v = self.g.addV(self.b.of(TrajectoryGraph.LABEL, vehId))\
-            .property(TrajectoryGraph.CAMID, self.b.of(TrajectoryGraph.CAMID, camId))\
-            .property(TrajectoryGraph.TIME, self.b.of(TrajectoryGraph.TIME, timestamp))\
-            .property(TrajectoryGraph.INDEX, self.b.of(TrajectoryGraph.INDEX, index))\
-            .next()
-        
-        logging.info("Trajectory Vertex v[{}] ({}, {}, {}) created.".format(v, vehId, camId, timestamp))
-        
-        return v
+        try:
+            v = self.g.addV(self.b.of(TrajectoryGraph.LABEL, vehId))\
+                .property(TrajectoryGraph.CAMID, self.b.of(TrajectoryGraph.CAMID, camId))\
+                .property(TrajectoryGraph.TIME, self.b.of(TrajectoryGraph.TIME, timestamp))\
+                .property(TrajectoryGraph.INDEX, self.b.of(TrajectoryGraph.INDEX, index))\
+                .next()
+            
+            logging.info("Trajectory Vertex v[{}] ({}, {}, {}) created.".format(v, vehId, camId, timestamp))
+            return v
+        except Exception as e:
+            logging.error(f"Error in addDetection: {e}")
+            # Return a placeholder ID to allow processing to continue
+            return f"error-vertex-{vehId}-{camId}-{int(timestamp)}"
 
         
     def linkDetection(self, src, dest, confidence):
-        logging.info("Link vertex v[{}] to v[{}]. Confidence {}".format(src, dest, confidence))
-        self.g.V(self.b.of(TrajectoryGraph.OUT_V, src))\
-            .as_("a")\
-            .V(self.b.of(TrajectoryGraph.IN_V, dest))\
-            .addE(self.b.of(TrajectoryGraph.LABEL, "next"))\
-            .from_("a")\
-            .property(TrajectoryGraph.CONFIDENCE, self.b.of(TrajectoryGraph.CONFIDENCE, confidence))\
-            .iterate()
+        try:
+            logging.info("Link vertex v[{}] to v[{}]. Confidence {}".format(src, dest, confidence))
+            self.g.V(self.b.of(TrajectoryGraph.OUT_V, src))\
+                .as_("a")\
+                .V(self.b.of(TrajectoryGraph.IN_V, dest))\
+                .addE(self.b.of(TrajectoryGraph.LABEL, "next"))\
+                .from_("a")\
+                .property(TrajectoryGraph.CONFIDENCE, self.b.of(TrajectoryGraph.CONFIDENCE, confidence))\
+                .iterate()
+        except Exception as e:
+            logging.error(f"Error in linkDetection: {e}")
+            # Continue execution despite the error
     
     def getValueMapById(self,id):
         value = self.g.V(self.b.of(TrajectoryGraph.VID, id)).valueMap(True).next()

@@ -2,5 +2,5 @@ scipy
 opencv-python
 filterpy
 gremlinpython
-minio
+redis
 jsonpickle
