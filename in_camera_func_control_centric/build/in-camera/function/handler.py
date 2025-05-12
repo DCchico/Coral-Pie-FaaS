@@ -29,7 +29,7 @@ vt = VehicleTracking()
 coldstart(tgraph)
 
 # Redis connection
-redis_host = os.environ.get("REDIS_ADDR", "128.110.217.193")
+redis_host = os.environ.get("REDIS_ADDR", "128.110.218.15")
 # redis_host = "128.110.217.193"
 redis_port = 6379
 redis_password = None  # Add password if your Redis requires authentication
@@ -61,19 +61,36 @@ def get_size_kb(obj):
 # Enhanced Redis helper functions for ordered processing
 def store_frame_state(camera_id, frame_id, obj):
     """Store state for a specific camera and frame"""
+    
+    store_metrics = {
+        "pickle_time": 0.0,
+        "memory_write_time": 0.0,
+        "obj_size_before": 0.0,
+        "serialized_size": 0.0,
+    }
+    
     try:
+        # Measure object size before serialization
+        store_metrics["obj_size_before"] = sys.getsizeof(obj)
+        
+        # Time the serialization
+        pickle_start = time.time()
         serialized_obj = pickle.dumps(obj)
+        store_metrics["pickle_time"] = (time.time() - pickle_start) * 1000  # Convert to ms
+        store_metrics["serialized_size"] = len(serialized_obj)
         
         # Store using camera_id:frame_id as key
         key = f"incamera:{camera_id}:{frame_id}"
         
+        # Time the Redis operations
+        redis_start = time.time()
         # Store the state
         result = redis_client.set(key, serialized_obj)
-        
         # Additionally, update a pointer to the latest frame
         redis_client.set(f"incamera:{camera_id}:latest", str(frame_id))
+        store_metrics["memory_write_time"] = (time.time() - redis_start) * 1000  # Convert to ms
         
-        return result, len(serialized_obj)
+        return result, len(serialized_obj), store_metrics
     except Exception as e:
         logging.error(f"Redis storage error: {e}")
         raise
@@ -99,7 +116,8 @@ def get_previous_frame_state(camera_id, current_frame_id, max_wait_seconds=10):
             "already_available": 0,
             "wait_cycles": 0,
             "key_found_after_wait": 0,
-            "timed_out": 0
+            "timed_out": 0,
+            "deserialization_time": 0.0
         }
         
         # Calculate the previous frame ID
@@ -121,7 +139,9 @@ def get_previous_frame_state(camera_id, current_frame_id, max_wait_seconds=10):
         
         if serialized_obj:
             logging.info(f"Previous frame {prev_frame_id} was immediately available")
+            deserialization_start = time.time()
             obj = pickle.loads(serialized_obj)
+            retrieval_metrics["deserialization_time"] = (time.time() - deserialization_start) * 1000
             size = len(serialized_obj)
             retrieval_metrics["already_available"] = 1
             return obj, size, retrieval_metrics
@@ -163,7 +183,9 @@ def get_previous_frame_state(camera_id, current_frame_id, max_wait_seconds=10):
                     retrieval_metrics["waiting_time"] = (time.time() - waiting_start - retrieval_metrics["final_retrieval_time"]/1000) * 1000  # ms
                 
             if serialized_obj:
+                deserialization_start = time.time()
                 obj = pickle.loads(serialized_obj)
+                retrieval_metrics["deserialization_time"] = (time.time() - deserialization_start) * 1000
                 size = len(serialized_obj)
                 wait_time = time.time() - wait_start
                 logging.info(f"Previous frame {prev_frame_id} became available after {wait_time:.2f}s")
@@ -467,7 +489,8 @@ def handle(req, context):
         start_upload_time = time.time()
         
         # Store the current frame's state
-        success, size_bytes = store_frame_state(camera_id, frame_id, current_vt)
+        success, size_bytes, store_metrics = store_frame_state(camera_id, frame_id, current_vt)
+        metrics["store_details"] = store_metrics
         stored_size_kb = size_bytes / 1024.0
             
         end_upload_time = time.time()
@@ -513,6 +536,7 @@ def handle(req, context):
         
         # Also include it at top level for flexibility
         response_data["retrieval_metrics"] = retrieval_details
+        response_data["store_metrics"] = store_metrics
         
         # Return the final response
         response = {

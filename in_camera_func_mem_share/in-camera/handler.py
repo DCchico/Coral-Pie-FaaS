@@ -27,27 +27,6 @@ logging.basicConfig(
 tgraph = None
 vt = None
 
-# Replace Redis imports
-# import redis
-# redis_host = os.environ.get("REDIS_ADDR", "128.110.217.193")
-# # redis_host = "128.110.217.193"
-# redis_port = 6379
-# redis_password = None  # Add password if your Redis requires authentication
-
-# Replace Redis initialization
-# redis_client = redis.Redis(
-#     host=redis_host,
-#     port=redis_port,
-#     password=redis_password,
-#     socket_timeout=5,
-#     decode_responses=False  # We need binary data for pickled objects
-# )
-# try:
-#     redis_client.ping()
-#     logging.info(f"Connected to Redis at {redis_host}:{redis_port}")
-# except redis.exceptions.ConnectionError as e:
-#     logging.error(f"Redis connection error: {e}")
-#     raise  # Fail if Redis is not available - no fallback
 
 # Function to get size of object in KB
 def get_size_kb(obj):
@@ -144,7 +123,8 @@ def get_previous_frame_state(camera_id, frame_id, mode="shared_memory", dependen
         "direct_access": 0.0,
         "waiting_time": 0.0,
         "already_available": 0.0,
-        "timed_out": 0.0
+        "timed_out": 0.0,
+        "deserialization_time": 0.0
     }
     
     if mode == "direct":
@@ -241,7 +221,9 @@ def get_previous_frame_state(camera_id, frame_id, mode="shared_memory", dependen
         # Read and deserialize state
         try:
             serialized = bytes(shm.buf[24:24+state_size])
+            deserialization_start = time.time()
             state = pickle.loads(serialized)
+            retrieval_metrics["deserialization_time"] = (time.time() - deserialization_start) * 1000
             return state, state_size, retrieval_metrics
         except Exception as e:
             sem_current.unlink()  # Cleanup if deserialization fails
