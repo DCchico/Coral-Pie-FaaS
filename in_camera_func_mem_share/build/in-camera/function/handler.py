@@ -59,7 +59,7 @@ def store_frame_state(camera_id, frame_id, tracking_obj, mode="shared_memory"):
 
     try:
         # Get the semaphore created during read phase
-        sem_name = f"/vt_camera_{camera_id}_frame_{frame_id}_sem"
+        sem_name = f"/vt_{camera_id}_{frame_id}_sem"
         try:
             sem = posix_ipc.Semaphore(sem_name)
         except posix_ipc.ExistentialError:
@@ -136,7 +136,7 @@ def get_previous_frame_state(camera_id, frame_id, mode="shared_memory", dependen
                 pass
             else:
                 # Try to open previous frame's semaphore with retries
-                sem_prev_name = f"/vt_camera_{camera_id}_frame_{frame_id-1}_sem"
+                sem_prev_name = f"/vt_{camera_id}_{frame_id-1}_sem"
                 wait_start = time.time()
                 sema_creation_timeout = 10  # 10 seconds timeout for semaphore creation
                 
@@ -187,7 +187,7 @@ def get_previous_frame_state(camera_id, frame_id, mode="shared_memory", dependen
                     return None, 0, retrieval_metrics
 
         # Create current frame's semaphore
-        sem_current_name = f"/vt_camera_{camera_id}_frame_{frame_id}_sem"
+        sem_current_name = f"/vt_{camera_id}_{frame_id}_sem"
         try:
             sem_current = posix_ipc.Semaphore(sem_current_name, posix_ipc.O_CREAT | posix_ipc.O_EXCL, initial_value=0)
         except posix_ipc.ExistentialError:
