@@ -67,11 +67,16 @@ def handle(event, context):
                 # Format: [x1, y1, x2, y2, score] - matching local_detector's go_format_boxes
                 bboxes.append(box + [score])
         
+        # Calculate total processing time at the end
+        end_time = time.time()
+        total_time = end_time - total_start_time
+        
         # Format metrics
         detection_metrics = {
             "model_loading_time": (end_model_loading - start_model_loading) * 1000.0,
             "preprocessing_time": (end_preprocess - start_preprocess) * 1000.0,
-            "prediction_time": (end_prediction - start_prediction) * 1000.0
+            "prediction_time": (end_prediction - start_prediction) * 1000.0,
+            "total_time": total_time * 1000.0
         }
         end_model_loading = start_model_loading
 
@@ -80,12 +85,10 @@ def handle(event, context):
             "camera_id": camera_id,
             "frame_id": frame_id,
             "image": encoded_image,
-            "bboxes": bboxes
+            "bboxes": bboxes,
+            "detection_metrics": detection_metrics
         }
 
-        # Calculate total processing time at the end
-        end_time = time.time()
-        total_time = end_time - total_start_time
 
         # Create monitoring metrics structure
         monitoring_metrics = {

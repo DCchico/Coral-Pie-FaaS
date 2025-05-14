@@ -537,6 +537,7 @@ def handle(req, context):
         # Also include it at top level for flexibility
         response_data["retrieval_metrics"] = retrieval_details
         response_data["store_metrics"] = store_metrics
+        response_data["detection_metrics"] = input_data.get("detection_metrics", {})
         
         # Return the final response
         response = {
