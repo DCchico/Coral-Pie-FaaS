@@ -15,6 +15,7 @@ import sys
 from multiprocessing import shared_memory
 import struct
 import posix_ipc  # Add this import at the top
+import requests
 
 # Initialize logging with clear format
 logging.basicConfig(
@@ -27,6 +28,8 @@ logging.basicConfig(
 tgraph = None
 vt = None
 
+# State proxy configuration
+STATE_PROXY_TIMEOUT = int(os.environ.get("STATE_PROXY_TIMEOUT", "10"))
 
 # Function to get size of object in KB
 def get_size_kb(obj):
@@ -37,11 +40,34 @@ def get_size_kb(obj):
         # Fallback to sys.getsizeof if pickle fails
         return sys.getsizeof(obj) / 1024.0
 
+def parse_remote_info(dependent_state_mode):
+    """
+    Parse remote information from dependent_state_mode header
+    Format: "remote:ip:port"
+    Returns: (is_remote, host, port) or (False, None, None)
+    """
+    if not dependent_state_mode or not dependent_state_mode.startswith("remote:"):
+        return False, None, None
+    
+    try:
+        # Parse "remote:ip:port" format
+        parts = dependent_state_mode.split(":")
+        if len(parts) == 3:
+            host = parts[1]
+            port = int(parts[2])
+            return True, host, port
+        else:
+            logging.warning(f"Invalid remote format in dependent_state_mode: {dependent_state_mode}")
+            return False, None, None
+    except (ValueError, IndexError) as e:
+        logging.error(f"Error parsing remote info from '{dependent_state_mode}': {e}")
+        return False, None, None
+
 # Replace Redis initialization
 # redis_client = redis.Redis(...)
 camera_states = {}  # Dictionary to track shared memory states by camera
 
-def store_frame_state(camera_id, frame_id, tracking_obj, mode="shared_memory"):
+def store_frame_state(camera_id, frame_id, tracking_obj, mode="shared_memory", remote_host=None, remote_port=None):
     """Store state for a specific camera and frame"""
     global camera_states, vt
     
@@ -50,13 +76,53 @@ def store_frame_state(camera_id, frame_id, tracking_obj, mode="shared_memory"):
         "memory_write_time": 0.0,
         "header_write_time": 0.0,
         "obj_size_before": 0.0,
-        "serialized_size": 0.0
+        "serialized_size": 0.0,
+        "remote_operation": False,
+        "remote_operation_time": 0.0
     }
     
     if mode == "direct":
         vt = tracking_obj
         return True, 0, store_metrics
+    
+    elif mode == "remote" and remote_host and remote_port:
+        store_metrics["remote_operation"] = True
+        try:
+            # Serialize the object locally
+            store_metrics["obj_size_before"] = sys.getsizeof(tracking_obj)
+            pickle_start = time.time()
+            serialized_data = pickle.dumps(tracking_obj)
+            store_metrics["pickle_time"] = (time.time() - pickle_start) * 1000
+            store_metrics["serialized_size"] = len(serialized_data)
+            
+            # Send to state proxy
+            proxy_url = f"http://{remote_host}:{remote_port}/state"
+            payload = {
+                "state_id": "vt",
+                "vdag_id": camera_id,
+                "frame_id": frame_id,
+                "op": "Put",
+                "data": base64.b64encode(serialized_data).decode('utf-8')
+            }
+            
+            write_start = time.time()
+            response = requests.post(proxy_url, json=payload, timeout=STATE_PROXY_TIMEOUT)
+            response.raise_for_status()
+            store_metrics["remote_operation_time"] = (time.time() - write_start) * 1000
+            
+            result = response.json()
+            if result.get("success"):
+                logging.info(f"Successfully stored state remotely via {remote_host}:{remote_port}")
+                return True, len(serialized_data), store_metrics
+            else:
+                logging.error(f"Remote store failed: {result.get('error', 'Unknown error')}")
+                return False, 0, store_metrics
+                
+        except Exception as e:
+            logging.error(f"Remote store error: {e}")
+            return False, 0, {"error": str(e), "remote_operation": True, "remote_operation_time": 0.0}
 
+    # Local shared memory storage (existing code)
     try:
         # Get the semaphore created during read phase
         sem_name = f"/vt_{camera_id}_{frame_id}_sem"
@@ -69,7 +135,7 @@ def store_frame_state(camera_id, frame_id, tracking_obj, mode="shared_memory"):
         if camera_id not in camera_states:
             try:
                 shm = shared_memory.SharedMemory(
-                    name=f"vt_camera_{camera_id}", 
+                    name=f"vt_{camera_id}", 
                     create=True, 
                     size=50*1024*1024
                 )
@@ -77,7 +143,7 @@ def store_frame_state(camera_id, frame_id, tracking_obj, mode="shared_memory"):
                 header = struct.pack("!QQQ", 0, 0, 0)
                 shm.buf[:len(header)] = header
             except FileExistsError:
-                shm = shared_memory.SharedMemory(name=f"vt_camera_{camera_id}")
+                shm = shared_memory.SharedMemory(name=f"vt_{camera_id}")
             camera_states[camera_id] = shm
         else:
             shm = camera_states[camera_id]
@@ -114,7 +180,7 @@ def store_frame_state(camera_id, frame_id, tracking_obj, mode="shared_memory"):
         logging.error(f"Error storing frame state: {e}")
         return False, 0, {"error": str(e)}
 
-def get_previous_frame_state(camera_id, frame_id, mode="shared_memory", dependent_mode="", max_wait_seconds=10):
+def get_previous_frame_state(camera_id, frame_id, mode="shared_memory", dependent_mode="", max_wait_seconds=10, remote_host=None, remote_port=None):
     """Get state from the previous frame"""
     global camera_states, vt
     
@@ -124,12 +190,51 @@ def get_previous_frame_state(camera_id, frame_id, mode="shared_memory", dependen
         "waiting_time": 0.0,
         "already_available": 0.0,
         "timed_out": 0.0,
-        "deserialization_time": 0.0
+        "deserialization_time": 0.0,
+        "remote_operation": False,
+        "remote_operation_time": 0.0
     }
     
     if mode == "direct":
         return vt, 0, retrieval_metrics
+    
+    elif mode == "remote" and remote_host and remote_port:
+        retrieval_metrics["remote_operation"] = True
+        try:
+            # Request from state proxy
+            proxy_url = f"http://{remote_host}:{remote_port}/state"
+            params = {
+                "state_id": "vt",
+                "vdag_id": camera_id,
+                "frame_id": frame_id - 1,
+                "op": "Get"
+            }
+            
+            network_start = time.time()
+            response = requests.get(proxy_url, params=params, timeout=STATE_PROXY_TIMEOUT)
+            response.raise_for_status()
+            retrieval_metrics["remote_operation_time"] = (time.time() - network_start) * 1000
+            
+            result = response.json()
+            if result.get("success") and result.get("data"):
+                # Deserialize locally
+                deserialization_start = time.time()
+                serialized_data = base64.b64decode(result["data"])
+                obj = pickle.loads(serialized_data)
+                retrieval_metrics["deserialization_time"] = (time.time() - deserialization_start) * 1000
+                retrieval_metrics["already_available"] = 1
+                
+                logging.info(f"Successfully retrieved state remotely from {remote_host}:{remote_port}")
+                return obj, len(serialized_data), retrieval_metrics
+            else:
+                logging.warning(f"No data available remotely: {result.get('error', 'No data')}")
+                return None, 0, retrieval_metrics
+                
+        except Exception as e:
+            logging.error(f"Remote get error: {e}")
+            return None, 0, {"error": str(e), "remote_operation": True, "remote_operation_time": 0.0}
 
+    # Local shared memory retrieval (existing code)
     try:
         if frame_id > 0:  # Skip for frame 0
             if dependent_mode == "direct":
@@ -202,7 +307,7 @@ def get_previous_frame_state(camera_id, frame_id, mode="shared_memory", dependen
         # Get or connect to shared memory
         if camera_id not in camera_states:
             try:
-                shm = shared_memory.SharedMemory(name=f"vt_camera_{camera_id}", create=False)
+                shm = shared_memory.SharedMemory(name=f"vt_{camera_id}", create=False)
                 camera_states[camera_id] = shm
             except FileNotFoundError:
                 sem_current.unlink()  # Cleanup if shm connection fails
@@ -456,14 +561,22 @@ def handle(req, context):
         # --- TIMING: State retrieval ---
         retrieve_start = time.time()
 
+        # Determine storage mode and parse remote information from headers
+        storage_mode = state_mode  # 'direct', 'shared_memory', 'remote'
+        
+        # Parse remote information from dependent_state_mode header
+        is_remote_retrieval, remote_host, remote_port = parse_remote_info(dependent_state_mode)
+        
         # Retrieve the VehicleTracking object from the previous frame
         start_download_time = time.time()
         retrieved_vt, size_bytes, retrieval_details = get_previous_frame_state(
             camera_id, 
             frame_id,
-            mode=state_mode,
+            mode=dependent_state_mode if not is_remote_retrieval else "remote",
             dependent_mode=dependent_state_mode,
-            max_wait_seconds=10
+            max_wait_seconds=10,
+            remote_host=remote_host if is_remote_retrieval else None,
+            remote_port=remote_port if is_remote_retrieval else None
         )
         # Check if retrieved_vt is a valid VehicleTracking object
         is_valid_vt = False
@@ -575,13 +688,20 @@ def handle(req, context):
         storage_start = time.time()
         metrics["timings"]["status_update"] = storage_start - status_start
         
+        # Parse remote information for storage (if storage_mode is remote)
+        is_remote_storage = (storage_mode == "remote")
+        storage_remote_host = remote_host if is_remote_storage else None
+        storage_remote_port = remote_port if is_remote_storage else None
+        
         # Store the current frame's state
         store_start_time = time.time()
         success, size_bytes, store_metrics = store_frame_state(
             camera_id, 
             frame_id, 
             current_vt,
-            mode=state_mode
+            mode=storage_mode,
+            remote_host=storage_remote_host,
+            remote_port=storage_remote_port
         )
         store_end_time = time.time()
         stored_size_kb = size_bytes / 1024.0
@@ -774,33 +894,123 @@ if __name__ == "__main__":
         encoded_image = base64.b64encode(buffer).decode('utf-8')
         print("Created fallback blank image")
     
-    # Create a mock event object
+    # Create a mock event object with headers
     class MockEvent:
-        def __init__(self, body_data):
-            self.body = body_data.encode('utf-8')
+        def __init__(self, body_data, headers=None):
+            self.body = body_data.encode('utf-8') if isinstance(body_data, str) else body_data
+            self.headers = headers or {}
     
-    # Test with a simple payload
-    payload = json.dumps({
-        "camera_id": "0",
-        "frame_id": "1",
+    def test_mode(mode_name, payload_data, headers=None):
+        """Test a specific mode and return results"""
+        print(f"\n{'='*20} Testing {mode_name} {'='*20}")
+        
+        payload = json.dumps(payload_data)
+        mock_event = MockEvent(payload, headers)
+        
+        try:
+            start_time = time.time()
+            result = handle(mock_event, None)
+            end_time = time.time()
+            
+            print(f"✅ {mode_name} completed in {end_time - start_time:.3f}s")
+            print(f"Status Code: {result.get('statusCode', 'N/A')}")
+            
+            if result.get('statusCode') == 200:
+                # Parse response to show key metrics
+                try:
+                    response_body = jsonpickle.decode(result.get('body', '{}'))
+                    metrics = response_body.get('detailed_metrics', {})
+                    
+                    # Show storage information
+                    retrieval_metrics = metrics.get('retrieval_details', {}).get('retrieval', {})
+                    store_metrics = metrics.get('store_details', {})
+                    
+                    print(f"  📊 Retrieval: remote={retrieval_metrics.get('remote_operation', False)}, "
+                          f"time={retrieval_metrics.get('remote_operation_time', 0):.2f}ms")
+                    print(f"  📊 Storage: remote={store_metrics.get('remote_operation', False)}, "
+                          f"time={store_metrics.get('remote_operation_time', 0):.2f}ms")
+                    
+                    # Show vehicle tracking results
+                    entering = response_body.get('entering_vehicles', [])
+                    leaving = response_body.get('leaving_vehicles', [])
+                    print(f"  🚗 Vehicles: {len(entering)} entering, {len(leaving)} leaving")
+                    
+                except Exception as e:
+                    print(f"  ⚠️ Could not parse response metrics: {e}")
+            else:
+                print(f"  ❌ Error: {result.get('body', 'Unknown error')}")
+                
+            return result
+            
+        except Exception as e:
+            print(f"  ❌ Exception in {mode_name}: {e}")
+            return None
+    
+    # Base payload for all tests
+    base_payload = {
+        "camera_id": "test_camera_0",
+        "frame_id": 1,
         "image": encoded_image,
         "bboxes": [[183.3546, 233.2469, 267.5851, 296.2590, 100]]
+    }
+    
+    # Test 1: Direct mode (no state persistence)
+    print("\n🚀 Starting Local Testing Suite...")
+    test_mode("Direct Mode", base_payload, {
+        'state-location': 'direct',
+        'dependent-state-location': ''
     })
     
-    mock_event = MockEvent(payload)
+    # Test 2: Local shared memory mode
+    test_mode("Local Shared Memory Mode", base_payload, {
+        'state-location': 'shared_memory',
+        'dependent-state-location': ''
+    })
     
-    print("\n==== Testing Handler with OpenFaaS Format ====")
-    result = handle(mock_event, None)
-    print("==== Result ====")
-    print(result)
-    print("====================\n")
+    # Test 3: Remote mode (will fail without StateProxy, but should handle gracefully)
+    test_mode("Remote Mode (No Proxy)", base_payload, {
+        'state-location': 'remote',
+        'dependent-state-location': 'remote:localhost:8080'
+    })
     
-    # Also test with STateFlow format
-    print("\n==== Testing with STateFlow Format ====")
-    stateflow_payload = {
-        "Payload": base64.b64encode(payload.encode('utf-8')).decode('utf-8')
-    }
-    result = handle(stateflow_payload, None)
-    print("==== Result ====")
-    print(result)
-    print("====================\n")
+    # Test 4: Test mode (skips graph operations)
+    test_payload = base_payload.copy()
+    test_payload['test_mode'] = True
+    test_mode("Test Mode", test_payload, {
+        'state-location': 'shared_memory',
+        'dependent-state-location': ''
+    })
+    
+    # Test 5: Frame sequence test (test state persistence)
+    print(f"\n{'='*20} Testing Frame Sequence {'='*20}")
+    for frame_id in range(1, 4):
+        frame_payload = base_payload.copy()
+        frame_payload['frame_id'] = frame_id
+        frame_payload['bboxes'] = [[183.3546 + frame_id*10, 233.2469, 267.5851, 296.2590, 100]]
+        
+        result = test_mode(f"Frame {frame_id}", frame_payload, {
+            'state-location': 'shared_memory',
+            'dependent-state-location': ''
+        })
+        
+        if result and result.get('statusCode') != 200:
+            print(f"  ⚠️ Frame {frame_id} failed, stopping sequence")
+            break
+    
+    # Test 6: STateFlow format
+    print(f"\n{'='*20} Testing STateFlow Format {'='*20}")
+    # Create proper STateFlow format - the payload should be the actual data, not a wrapper
+    stateflow_payload = base64.b64encode(json.dumps(base_payload).encode('utf-8')).decode('utf-8')
+    test_mode("STateFlow Format", stateflow_payload, {
+        'state-location': 'shared_memory',
+        'dependent-state-location': ''
+    })
+    
+    print(f"\n{'='*20} Testing Complete {'='*20}")
+    print("✅ All local tests completed!")
+    print("\n📝 Next Steps:")
+    print("1. If all tests pass, the handler is ready for deployment")
+    print("2. For remote mode testing, you'll need to:")
+    print("   - Build and deploy your Go StateProxy")
+    print("   - Deploy this handler to your FaaS cluster")
+    print("   - Test with actual remote StateProxy instances")

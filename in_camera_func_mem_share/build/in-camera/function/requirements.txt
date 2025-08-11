@@ -6,4 +6,5 @@ minio
 jsonpickle
 numpy
 posix-ipc
+requests
 # redis  # You can comment this out if you're fully replacing Redis
