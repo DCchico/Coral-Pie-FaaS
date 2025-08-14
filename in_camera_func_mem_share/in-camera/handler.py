@@ -129,15 +129,22 @@ def store_frame_state(camera_id, frame_id, tracking_obj, mode="shared_memory", r
         try:
             sem = posix_ipc.Semaphore(sem_name)
         except posix_ipc.ExistentialError:
-            debug_info = {
-                "error": "no_read_semaphore",
-                "semaphore_name": sem_name,
-                "camera_id": camera_id,
-                "frame_id": frame_id,
-                "operation": "semaphore_retrieval"
-            }
-            logging.error(f"Semaphore not found: {sem_name}")
-            return False, 0, debug_info
+            # Semaphore doesn't exist - create it instead of returning error
+            logging.info(f"Semaphore not found, creating new semaphore: {sem_name}")
+            try:
+                sem = posix_ipc.Semaphore(sem_name, posix_ipc.O_CREAT, initial_value=0)
+                logging.info(f"Successfully created semaphore: {sem_name}")
+            except Exception as create_error:
+                debug_info = {
+                    "error": "semaphore_creation_failed",
+                    "semaphore_name": sem_name,
+                    "camera_id": camera_id,
+                    "frame_id": frame_id,
+                    "creation_error": str(create_error),
+                    "operation": "semaphore_creation"
+                }
+                logging.error(f"Failed to create semaphore {sem_name}: {create_error}")
+                return False, 0, debug_info
         except PermissionError as perm_error:
             debug_info = {
                 "error": "permission_denied_semaphore_retrieval",
