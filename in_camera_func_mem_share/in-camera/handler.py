@@ -129,7 +129,40 @@ def store_frame_state(camera_id, frame_id, tracking_obj, mode="shared_memory", r
         try:
             sem = posix_ipc.Semaphore(sem_name)
         except posix_ipc.ExistentialError:
-            return False, 0, {"error": "no_read_semaphore"}
+            debug_info = {
+                "error": "no_read_semaphore",
+                "semaphore_name": sem_name,
+                "camera_id": camera_id,
+                "frame_id": frame_id,
+                "operation": "semaphore_retrieval"
+            }
+            logging.error(f"Semaphore not found: {sem_name}")
+            return False, 0, debug_info
+        except PermissionError as perm_error:
+            debug_info = {
+                "error": "permission_denied_semaphore_retrieval",
+                "semaphore_name": sem_name,
+                "camera_id": camera_id,
+                "frame_id": frame_id,
+                "permission_error": str(perm_error),
+                "current_user": os.getuid(),
+                "current_group": os.getgid(),
+                "operation": "semaphore_retrieval"
+            }
+            logging.error(f"Permission denied retrieving semaphore {sem_name}: {perm_error}")
+            return False, 0, debug_info
+        except OSError as os_error:
+            debug_info = {
+                "error": "os_error_semaphore_retrieval",
+                "semaphore_name": sem_name,
+                "camera_id": camera_id,
+                "frame_id": frame_id,
+                "os_error": str(os_error),
+                "error_code": getattr(os_error, 'errno', 'unknown'),
+                "operation": "semaphore_retrieval"
+            }
+            logging.error(f"OS error retrieving semaphore {sem_name}: {os_error}")
+            return False, 0, debug_info
 
         # Rest of your existing shared memory code...
         if camera_id not in camera_states:
@@ -144,6 +177,31 @@ def store_frame_state(camera_id, frame_id, tracking_obj, mode="shared_memory", r
                 shm.buf[:len(header)] = header
             except FileExistsError:
                 shm = shared_memory.SharedMemory(name=f"vt_{camera_id}")
+            except PermissionError as perm_error:
+                debug_info = {
+                    "error": "permission_denied_shared_memory_creation",
+                    "shared_memory_name": f"vt_{camera_id}",
+                    "camera_id": camera_id,
+                    "frame_id": frame_id,
+                    "permission_error": str(perm_error),
+                    "current_user": os.getuid(),
+                    "current_group": os.getgid(),
+                    "operation": "shared_memory_creation"
+                }
+                logging.error(f"Permission denied creating shared memory vt_{camera_id}: {perm_error}")
+                return False, 0, debug_info
+            except OSError as os_error:
+                debug_info = {
+                    "error": "os_error_shared_memory_creation",
+                    "shared_memory_name": f"vt_{camera_id}",
+                    "camera_id": camera_id,
+                    "frame_id": frame_id,
+                    "os_error": str(os_error),
+                    "error_code": getattr(os_error, 'errno', 'unknown'),
+                    "operation": "shared_memory_creation"
+                }
+                logging.error(f"OS error creating shared memory vt_{camera_id}: {os_error}")
+                return False, 0, debug_info
             camera_states[camera_id] = shm
         else:
             shm = camera_states[camera_id]
@@ -206,7 +264,7 @@ def get_previous_frame_state(camera_id, frame_id, mode="shared_memory", dependen
             params = {
                 "state_id": "vt",
                 "vdag_id": camera_id,
-                "frame_id": frame_id - 1,
+                "frame_id": frame_id,
                 "op": "Get"
             }
             
@@ -272,8 +330,15 @@ def get_previous_frame_state(camera_id, frame_id, mode="shared_memory", dependen
                             # Help cleanup previous frame's semaphore
                             try:
                                 sem_prev.unlink()
-                            except:
-                                return None, 0, {"error": "semaphore_cleanup_error", **retrieval_metrics}
+                            except Exception as cleanup_error:
+                                # logging.error(f"Semaphore cleanup error: {cleanup_error}")
+                                # return None, 0, {"error": "semaphore_cleanup_error", "cleanup_details": str(cleanup_error), **retrieval_metrics}
+                                
+                                # TODO: we cannot fix this permission error, we continue without cleanup
+                                # Log the cleanup error but continue processing
+                                logging.warning(f"Semaphore cleanup failed (non-critical): {cleanup_error}")
+                                # Don't return error - just continue without cleanup
+                                
                             break
                         except posix_ipc.BusyError:  # This is raised on timeout
                             retrieval_metrics["timed_out"] = 1
@@ -284,6 +349,34 @@ def get_previous_frame_state(camera_id, frame_id, mode="shared_memory", dependen
                         # Semaphore doesn't exist yet, wait a bit and retry
                         time.sleep(0.01)  # 10ms sleep
                         continue
+                    except PermissionError as perm_error:
+                        # Permission denied when trying to open semaphore
+                        debug_info = {
+                            "error": "permission_denied_semaphore_open",
+                            "semaphore_name": sem_prev_name,
+                            "camera_id": camera_id,
+                            "frame_id": frame_id,
+                            "permission_error": str(perm_error),
+                            "current_user": os.getuid(),
+                            "current_group": os.getgid(),
+                            "wait_elapsed": time.time() - wait_start,
+                            "retry_count": int((time.time() - wait_start) / 0.01)
+                        }
+                        logging.error(f"Permission denied opening semaphore {sem_prev_name}: {perm_error}")
+                        return None, 0, {**retrieval_metrics, **debug_info}
+                    except OSError as os_error:
+                        # Other OS-level errors
+                        debug_info = {
+                            "error": "os_error_semaphore_open",
+                            "semaphore_name": sem_prev_name,
+                            "camera_id": camera_id,
+                            "frame_id": frame_id,
+                            "os_error": str(os_error),
+                            "error_code": getattr(os_error, 'errno', 'unknown'),
+                            "wait_elapsed": time.time() - wait_start
+                        }
+                        logging.error(f"OS error opening semaphore {sem_prev_name}: {os_error}")
+                        return None, 0, {**retrieval_metrics, **debug_info}
                     
                 # If we exit the loop due to timeout
                 if (time.time() - wait_start) >= sema_creation_timeout:
@@ -296,7 +389,40 @@ def get_previous_frame_state(camera_id, frame_id, mode="shared_memory", dependen
         try:
             sem_current = posix_ipc.Semaphore(sem_current_name, posix_ipc.O_CREAT | posix_ipc.O_EXCL, initial_value=0)
         except posix_ipc.ExistentialError:
-            return None, 0, {"error": "concurrent_read_attempt", **retrieval_metrics}
+            debug_info = {
+                "error": "concurrent_read_attempt",
+                "semaphore_name": sem_current_name,
+                "camera_id": camera_id,
+                "frame_id": frame_id,
+                "operation": "semaphore_creation"
+            }
+            logging.error(f"Concurrent read attempt detected for semaphore {sem_current_name}")
+            return None, 0, {**retrieval_metrics, **debug_info}
+        except PermissionError as perm_error:
+            debug_info = {
+                "error": "permission_denied_semaphore_creation",
+                "semaphore_name": sem_current_name,
+                "camera_id": camera_id,
+                "frame_id": frame_id,
+                "permission_error": str(perm_error),
+                "current_user": os.getuid(),
+                "current_group": os.getgid(),
+                "operation": "semaphore_creation"
+            }
+            logging.error(f"Permission denied creating semaphore {sem_current_name}: {perm_error}")
+            return None, 0, {**retrieval_metrics, **debug_info}
+        except OSError as os_error:
+            debug_info = {
+                "error": "os_error_semaphore_creation",
+                "semaphore_name": sem_current_name,
+                "camera_id": camera_id,
+                "frame_id": frame_id,
+                "os_error": str(os_error),
+                "error_code": getattr(os_error, 'errno', 'unknown'),
+                "operation": "semaphore_creation"
+            }
+            logging.error(f"OS error creating semaphore {sem_current_name}: {os_error}")
+            return None, 0, {**retrieval_metrics, **debug_info}
 
         if frame_id == 0:
             return None, 0, retrieval_metrics
@@ -311,17 +437,75 @@ def get_previous_frame_state(camera_id, frame_id, mode="shared_memory", dependen
                 camera_states[camera_id] = shm
             except FileNotFoundError:
                 sem_current.unlink()  # Cleanup if shm connection fails
-                return None, 0, {"error": "no_shared_memory", **retrieval_metrics}
+                debug_info = {
+                    "error": "no_shared_memory",
+                    "shared_memory_name": f"vt_{camera_id}",
+                    "camera_id": camera_id,
+                    "frame_id": frame_id,
+                    "operation": "shared_memory_connection"
+                }
+                logging.error(f"Shared memory not found: vt_{camera_id}")
+                return None, 0, {**retrieval_metrics, **debug_info}
+            except PermissionError as perm_error:
+                sem_current.unlink()  # Cleanup if shm connection fails
+                debug_info = {
+                    "error": "permission_denied_shared_memory",
+                    "shared_memory_name": f"vt_{camera_id}",
+                    "camera_id": camera_id,
+                    "frame_id": frame_id,
+                    "permission_error": str(perm_error),
+                    "current_user": os.getuid(),
+                    "current_group": os.getgid(),
+                    "operation": "shared_memory_connection"
+                }
+                logging.error(f"Permission denied accessing shared memory vt_{camera_id}: {perm_error}")
+                return None, 0, {**retrieval_metrics, **debug_info}
+            except OSError as os_error:
+                sem_current.unlink()  # Cleanup if shm connection fails
+                debug_info = {
+                    "error": "os_error_shared_memory",
+                    "shared_memory_name": f"vt_{camera_id}",
+                    "camera_id": camera_id,
+                    "frame_id": frame_id,
+                    "os_error": str(os_error),
+                    "error_code": getattr(os_error, 'errno', 'unknown'),
+                    "operation": "shared_memory_connection"
+                }
+                logging.error(f"OS error accessing shared memory vt_{camera_id}: {os_error}")
+                return None, 0, {**retrieval_metrics, **debug_info}
         
         shm = camera_states[camera_id]
         
         # Read header
-        header = bytes(shm.buf[:24])
-        current_frame, state_size, valid = struct.unpack("!QQQ", header)
+        try:
+            header = bytes(shm.buf[:24])
+            current_frame, state_size, valid = struct.unpack("!QQQ", header)
+        except Exception as header_error:
+            debug_info = {
+                "error": "header_reading_error",
+                "shared_memory_name": f"vt_{camera_id}",
+                "camera_id": camera_id,
+                "frame_id": frame_id,
+                "header_error": str(header_error),
+                "operation": "header_reading"
+            }
+            logging.error(f"Error reading shared memory header: {header_error}")
+            return None, 0, {**retrieval_metrics, **debug_info}
         
         if valid != 1 or current_frame != frame_id - 1:
-            sem_current.unlink()  # Cleanup if invalid state
-            return None, 0, {"error": "invalid_or_wrong_frame", **retrieval_metrics}
+            debug_info = {
+                "error": "invalid_or_wrong_frame",
+                "shared_memory_name": f"vt_{camera_id}",
+                "camera_id": camera_id,
+                "frame_id": frame_id,
+                "expected_frame": frame_id - 1,
+                "actual_frame": current_frame,
+                "valid_flag": valid,
+                "state_size": state_size,
+                "operation": "frame_validation"
+            }
+            logging.error(f"Invalid frame data: expected frame {frame_id - 1}, got {current_frame}, valid={valid}")
+            return None, 0, {**retrieval_metrics, **debug_info}
 
         # Read and deserialize state
         try:
@@ -330,9 +514,46 @@ def get_previous_frame_state(camera_id, frame_id, mode="shared_memory", dependen
             state = pickle.loads(serialized)
             retrieval_metrics["deserialization_time"] = (time.time() - deserialization_start) * 1000
             return state, state_size, retrieval_metrics
+        except IndexError as index_error:
+            sem_current.unlink()  # Cleanup if deserialization fails
+            debug_info = {
+                "error": "index_error_deserialization",
+                "shared_memory_name": f"vt_{camera_id}",
+                "camera_id": camera_id,
+                "frame_id": frame_id,
+                "state_size": state_size,
+                "buffer_size": len(shm.buf),
+                "index_error": str(index_error),
+                "operation": "deserialization"
+            }
+            logging.error(f"Index error during deserialization: {index_error}")
+            return None, 0, {**retrieval_metrics, **debug_info}
+        except pickle.UnpicklingError as pickle_error:
+            debug_info = {
+                "error": "pickle_error_deserialization",
+                "shared_memory_name": f"vt_{camera_id}",
+                "camera_id": camera_id,
+                "frame_id": frame_id,
+                "state_size": state_size,
+                "pickle_error": str(pickle_error),
+                "operation": "deserialization"
+            }
+            logging.error(f"Pickle error during deserialization: {pickle_error}")
+            return None, 0, {**retrieval_metrics, **debug_info}
         except Exception as e:
             sem_current.unlink()  # Cleanup if deserialization fails
-            raise
+            debug_info = {
+                "error": "general_deserialization_error",
+                "shared_memory_name": f"vt_{camera_id}",
+                "camera_id": camera_id,
+                "frame_id": frame_id,
+                "state_size": state_size,
+                "exception_type": type(e).__name__,
+                "exception_message": str(e),
+                "operation": "deserialization"
+            }
+            logging.error(f"General error during deserialization: {e}")
+            return None, 0, {**retrieval_metrics, **debug_info}
 
     except Exception as e:
         logging.error(f"Error retrieving frame state: {e}")
@@ -578,6 +799,36 @@ def handle(req, context):
             remote_host=remote_host if is_remote_retrieval else None,
             remote_port=remote_port if is_remote_retrieval else None
         )
+        
+        # Check for retrieval errors and return detailed debug information
+        if retrieval_details and retrieval_details.get("error"):
+            error_type = retrieval_details.get("error")
+            debug_info = {
+                "error": f"State retrieval failed: {error_type}",
+                "camera_id": camera_id,
+                "frame_id": frame_id,
+                "storage_mode": dependent_state_mode,
+                "retrieval_details": retrieval_details,
+                "current_user": os.getuid(),
+                "current_group": os.getgid(),
+                "operation": "state_retrieval"
+            }
+            
+            # Add specific error handling for permission issues
+            if "permission_denied" in error_type:
+                debug_info["suggestion"] = "Container may need root privileges or specific capabilities for shared memory access"
+                debug_info["permission_details"] = {
+                    "semaphore_name": retrieval_details.get("semaphore_name"),
+                    "shared_memory_name": retrieval_details.get("shared_memory_name"),
+                    "permission_error": retrieval_details.get("permission_error")
+                }
+            
+            logging.error(f"State retrieval failed: {error_type}")
+            return {
+                "statusCode": 400,
+                "body": json.dumps(debug_info)
+            }
+        
         # Check if retrieved_vt is a valid VehicleTracking object
         is_valid_vt = False
         try:
@@ -705,6 +956,35 @@ def handle(req, context):
         )
         store_end_time = time.time()
         stored_size_kb = size_bytes / 1024.0
+        
+        # Check for storage errors and return detailed debug information
+        if not success and store_metrics and store_metrics.get("error"):
+            error_type = store_metrics.get("error")
+            debug_info = {
+                "error": f"State storage failed: {error_type}",
+                "camera_id": camera_id,
+                "frame_id": frame_id,
+                "storage_mode": storage_mode,
+                "store_metrics": store_metrics,
+                "current_user": os.getuid(),
+                "current_group": os.getgid(),
+                "operation": "state_storage"
+            }
+            
+            # Add specific error handling for permission issues
+            if "permission_denied" in error_type or "no_read_semaphore" in error_type:
+                debug_info["suggestion"] = "Container may need root privileges or specific capabilities for shared memory access"
+                debug_info["permission_details"] = {
+                    "semaphore_name": store_metrics.get("semaphore_name"),
+                    "shared_memory_name": store_metrics.get("shared_memory_name"),
+                    "permission_error": store_metrics.get("permission_error")
+                }
+            
+            logging.error(f"State storage failed: {error_type}")
+            return {
+                "statusCode": 400,
+                "body": json.dumps(debug_info)
+            }
             
         # Mark end of state handling and start of post-processing
         state_handling_end = time.time()

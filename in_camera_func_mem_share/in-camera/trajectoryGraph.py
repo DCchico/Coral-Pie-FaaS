@@ -35,7 +35,7 @@ class TrajectoryGraph:
     def __init__( self ):
         self.b = Bindings()
         self.graph = Graph()
-        janus_addr = os.environ.get("JANUS_ADDR", "128.110.217.193")
+        janus_addr = os.environ.get("JANUS_ADDR", "128.110.217.91")
         
         # Import the proper serializer
         from gremlin_python.driver.serializer import GraphSONMessageSerializer

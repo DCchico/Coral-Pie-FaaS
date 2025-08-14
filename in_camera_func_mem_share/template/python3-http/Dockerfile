@@ -50,6 +50,7 @@ WORKDIR /home/app/
 
 # configure WSGI server and healthcheck
 USER app
+# USER root  # Changed to root to allow semaphore cleanup
 
 ENV fprocess="python index.py"
 ENV cgi_headers="true"
