@@ -1094,7 +1094,7 @@ def handle(req, context):
             "pre_state_processing": pre_state_time,
             "post_state_processing": post_state_time,
             "state_handling": {
-                "level": "L2" if state_mode == "shared_memory" else "L1",
+                "level": "L2" if state_mode == "shared_memory" else "L1" if state_mode == "direct" else "L3",
                 "process_time": state_handling_time,
                 "data_transfer": metrics["timings"]["retrieval"] + metrics["timings"]["storage"],
                 "idle_time": idle_time
