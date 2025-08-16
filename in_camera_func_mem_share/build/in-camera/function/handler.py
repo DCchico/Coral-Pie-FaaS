@@ -260,7 +260,7 @@ def get_previous_frame_state(camera_id, frame_id, mode="shared_memory", dependen
         "remote_operation_time": 0.0
     }
     
-    if mode == "direct":
+    if mode == "direct" and dependent_mode == "direct":
         return vt, 0, retrieval_metrics
     
     elif mode == "remote" and remote_host and remote_port:
@@ -301,89 +301,86 @@ def get_previous_frame_state(camera_id, frame_id, mode="shared_memory", dependen
 
     # Local shared memory retrieval (existing code)
     try:
-        if frame_id > 0:  # Skip for frame 0
-            if dependent_mode == "direct":
-                pass
-            else:
-                # Try to open previous frame's semaphore with retries
-                sem_prev_name = f"/vt_{camera_id}_{frame_id-1}_sem"
-                wait_start = time.time()
-                sema_creation_timeout = 10  # 10 seconds timeout for semaphore creation
-                
-                while (time.time() - wait_start) < max_wait_seconds:
+        if frame_id > 0 and dependent_mode != "direct":
+            # Try to open previous frame's semaphore with retries
+            sem_prev_name = f"/vt_{camera_id}_{frame_id-1}_sem"
+            wait_start = time.time()
+            sema_creation_timeout = 10  # 10 seconds timeout for semaphore creation
+            
+            while (time.time() - wait_start) < max_wait_seconds:
+                try:
+                    sem_prev = posix_ipc.Semaphore(sem_prev_name)
+                    # If we get here, semaphore exists
+                    
+                    # Try to acquire with remaining time from max_wait_seconds
+                    elapsed = time.time() - wait_start
+                    remaining_time = max_wait_seconds - elapsed
+                    
+                    if remaining_time <= 0:
+                        retrieval_metrics["timed_out"] = 1
+                        retrieval_metrics["waiting_time"] = elapsed * 1000  # Convert to ms
+                        return None, 0, retrieval_metrics
+                    
+                    # Try to acquire the semaphore
                     try:
-                        sem_prev = posix_ipc.Semaphore(sem_prev_name)
-                        # If we get here, semaphore exists
+                        sem_prev.acquire(timeout=remaining_time)  # Returns None on success, raises exception on failure/timeout
+                        # Successfully acquired if we get here
+                        total_wait = time.time() - wait_start
+                        if total_wait < 0.001:
+                            retrieval_metrics["already_available"] = 1
+                        else:
+                            retrieval_metrics["waiting_time"] = total_wait * 1000
                         
-                        # Try to acquire with remaining time from max_wait_seconds
-                        elapsed = time.time() - wait_start
-                        remaining_time = max_wait_seconds - elapsed
-                        
-                        if remaining_time <= 0:
-                            retrieval_metrics["timed_out"] = 1
-                            retrieval_metrics["waiting_time"] = elapsed * 1000  # Convert to ms
-                            return None, 0, retrieval_metrics
-                        
-                        # Try to acquire the semaphore
+                        # Help cleanup previous frame's semaphore
                         try:
-                            sem_prev.acquire(timeout=remaining_time)  # Returns None on success, raises exception on failure/timeout
-                            # Successfully acquired if we get here
-                            total_wait = time.time() - wait_start
-                            if total_wait < 0.001:
-                                retrieval_metrics["already_available"] = 1
-                            else:
-                                retrieval_metrics["waiting_time"] = total_wait * 1000
+                            sem_prev.unlink()
+                        except Exception as cleanup_error:
+                            # logging.error(f"Semaphore cleanup error: {cleanup_error}")
+                            # return None, 0, {"error": "semaphore_cleanup_error", "cleanup_details": str(cleanup_error), **retrieval_metrics}
                             
-                            # Help cleanup previous frame's semaphore
-                            try:
-                                sem_prev.unlink()
-                            except Exception as cleanup_error:
-                                # logging.error(f"Semaphore cleanup error: {cleanup_error}")
-                                # return None, 0, {"error": "semaphore_cleanup_error", "cleanup_details": str(cleanup_error), **retrieval_metrics}
-                                
-                                # TODO: we cannot fix this permission error, we continue without cleanup
-                                # Log the cleanup error but continue processing
-                                logging.warning(f"Semaphore cleanup failed (non-critical): {cleanup_error}")
-                                # Don't return error - just continue without cleanup
-                                
-                            break
-                        except posix_ipc.BusyError:  # This is raised on timeout
-                            retrieval_metrics["timed_out"] = 1
-                            retrieval_metrics["waiting_time"] = max_wait_seconds * 1000
-                            return None, 0, retrieval_metrics
+                            # TODO: we cannot fix this permission error, we continue without cleanup
+                            # Log the cleanup error but continue processing
+                            logging.warning(f"Semaphore cleanup failed (non-critical): {cleanup_error}")
+                            # Don't return error - just continue without cleanup
                             
-                    except posix_ipc.ExistentialError:
-                        # Semaphore doesn't exist yet, wait a bit and retry
-                        time.sleep(0.01)  # 10ms sleep
-                        continue
-                    except PermissionError as perm_error:
-                        # Permission denied when trying to open semaphore
-                        debug_info = {
-                            "error": "permission_denied_semaphore_open",
-                            "semaphore_name": sem_prev_name,
-                            "camera_id": camera_id,
-                            "frame_id": frame_id,
-                            "permission_error": str(perm_error),
-                            "current_user": os.getuid(),
-                            "current_group": os.getgid(),
-                            "wait_elapsed": time.time() - wait_start,
-                            "retry_count": int((time.time() - wait_start) / 0.01)
-                        }
-                        logging.error(f"Permission denied opening semaphore {sem_prev_name}: {perm_error}")
-                        return None, 0, {**retrieval_metrics, **debug_info}
-                    except OSError as os_error:
-                        # Other OS-level errors
-                        debug_info = {
-                            "error": "os_error_semaphore_open",
-                            "semaphore_name": sem_prev_name,
-                            "camera_id": camera_id,
-                            "frame_id": frame_id,
-                            "os_error": str(os_error),
-                            "error_code": getattr(os_error, 'errno', 'unknown'),
-                            "wait_elapsed": time.time() - wait_start
-                        }
-                        logging.error(f"OS error opening semaphore {sem_prev_name}: {os_error}")
-                        return None, 0, {**retrieval_metrics, **debug_info}
+                        break
+                    except posix_ipc.BusyError:  # This is raised on timeout
+                        retrieval_metrics["timed_out"] = 1
+                        retrieval_metrics["waiting_time"] = max_wait_seconds * 1000
+                        return None, 0, retrieval_metrics
+                        
+                except posix_ipc.ExistentialError:
+                    # Semaphore doesn't exist yet, wait a bit and retry
+                    time.sleep(0.01)  # 10ms sleep
+                    continue
+                except PermissionError as perm_error:
+                    # Permission denied when trying to open semaphore
+                    debug_info = {
+                        "error": "permission_denied_semaphore_open",
+                        "semaphore_name": sem_prev_name,
+                        "camera_id": camera_id,
+                        "frame_id": frame_id,
+                        "permission_error": str(perm_error),
+                        "current_user": os.getuid(),
+                        "current_group": os.getgid(),
+                        "wait_elapsed": time.time() - wait_start,
+                        "retry_count": int((time.time() - wait_start) / 0.01)
+                    }
+                    logging.error(f"Permission denied opening semaphore {sem_prev_name}: {perm_error}")
+                    return None, 0, {**retrieval_metrics, **debug_info}
+                except OSError as os_error:
+                    # Other OS-level errors
+                    debug_info = {
+                        "error": "os_error_semaphore_open",
+                        "semaphore_name": sem_prev_name,
+                        "camera_id": camera_id,
+                        "frame_id": frame_id,
+                        "os_error": str(os_error),
+                        "error_code": getattr(os_error, 'errno', 'unknown'),
+                        "wait_elapsed": time.time() - wait_start
+                    }
+                    logging.error(f"OS error opening semaphore {sem_prev_name}: {os_error}")
+                    return None, 0, {**retrieval_metrics, **debug_info}
                     
                 # If we exit the loop due to timeout
                 if (time.time() - wait_start) >= sema_creation_timeout:
@@ -404,31 +401,6 @@ def get_previous_frame_state(camera_id, frame_id, mode="shared_memory", dependen
                 "operation": "semaphore_creation"
             }
             logging.error(f"Concurrent read attempt detected for semaphore {sem_current_name}")
-            return None, 0, {**retrieval_metrics, **debug_info}
-        except PermissionError as perm_error:
-            debug_info = {
-                "error": "permission_denied_semaphore_creation",
-                "semaphore_name": sem_current_name,
-                "camera_id": camera_id,
-                "frame_id": frame_id,
-                "permission_error": str(perm_error),
-                "current_user": os.getuid(),
-                "current_group": os.getgid(),
-                "operation": "semaphore_creation"
-            }
-            logging.error(f"Permission denied creating semaphore {sem_current_name}: {perm_error}")
-            return None, 0, {**retrieval_metrics, **debug_info}
-        except OSError as os_error:
-            debug_info = {
-                "error": "os_error_semaphore_creation",
-                "semaphore_name": sem_current_name,
-                "camera_id": camera_id,
-                "frame_id": frame_id,
-                "os_error": str(os_error),
-                "error_code": getattr(os_error, 'errno', 'unknown'),
-                "operation": "semaphore_creation"
-            }
-            logging.error(f"OS error creating semaphore {sem_current_name}: {os_error}")
             return None, 0, {**retrieval_metrics, **debug_info}
 
         if frame_id == 0:
@@ -800,7 +772,7 @@ def handle(req, context):
         retrieved_vt, size_bytes, retrieval_details = get_previous_frame_state(
             camera_id, 
             frame_id,
-            mode=dependent_state_mode if not is_remote_retrieval else "remote",
+            mode=state_mode if not is_remote_retrieval else "remote",
             dependent_mode=dependent_state_mode,
             max_wait_seconds=10,
             remote_host=remote_host if is_remote_retrieval else None,
@@ -1094,7 +1066,7 @@ def handle(req, context):
             "pre_state_processing": pre_state_time,
             "post_state_processing": post_state_time,
             "state_handling": {
-                "level": "L2" if state_mode == "shared_memory" else "L1",
+                "level": "L2" if state_mode == "shared_memory" else "L1" if state_mode == "direct" else "L3",
                 "process_time": state_handling_time,
                 "data_transfer": metrics["timings"]["retrieval"] + metrics["timings"]["storage"],
                 "idle_time": idle_time
