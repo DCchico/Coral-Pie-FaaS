@@ -317,12 +317,14 @@ def handle(req, context):
             }
             
         encoded_image = input_data.get('image')
+        '''
         if not encoded_image:
             logging.error("Missing image field")
             return {
                 "statusCode": 400,
                 "body": json.dumps({"error": "Missing image field"})
             }
+        '''    
             
         bboxes = input_data.get('bboxes')
         if not bboxes:
@@ -414,9 +416,15 @@ def handle(req, context):
         
         # Decode image with enhanced error handling
         try:
-            decoded_image = base64.b64decode(encoded_image)
-            nparr = np.frombuffer(decoded_image, np.uint8)
-            image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            # decoded_image = base64.b64decode(encoded_image)
+            # nparr = np.frombuffer(decoded_image, np.uint8)
+            # image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            # Calculate image index from frame_id (modulo operation)
+            image_index = frame_id % 100
+            # Format image filename with leading zeros (e.g., 000076.jpeg)
+            image_filename = f"{image_index:06d}.jpeg"
+            image_path = f"function/camera_stream_data/{image_filename}"
+            image = cv2.imread(image_path)
             if image is None:
                 raise ValueError("Failed to decode image")
             logging.info(f"Successfully decoded image, shape: {image.shape}")
@@ -430,7 +438,7 @@ def handle(req, context):
         # --- TIMING: Sort update (tracking) ---
         sort_start = time.time()
         metrics["timings"]["image_decoding"] = sort_start - decode_start
-        metrics["sizes"]["image_kb"] = len(decoded_image) / 1024.0
+        # metrics["sizes"]["image_kb"] = len(decoded_image) / 1024.0
         
         # Use retrieved or create new if not found
         current_vt = retrieved_vt if retrieved_vt else VehicleTracking()

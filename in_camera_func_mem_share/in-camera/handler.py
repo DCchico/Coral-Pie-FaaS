@@ -265,6 +265,9 @@ def get_previous_frame_state(camera_id, frame_id, mode="shared_memory", dependen
     
     elif mode == "remote" and remote_host and remote_port:
         retrieval_metrics["remote_operation"] = True
+        if dependent_mode == "direct":
+            return vt, 0, retrieval_metrics
+        
         try:
             # Request from state proxy
             proxy_url = f"http://{remote_host}:{remote_port}/state"
@@ -677,13 +680,14 @@ def handle(req, context):
             }
             
         encoded_image = input_data.get('image')
+        '''
         if not encoded_image:
             logging.error("Missing image field")
             return {
                 "statusCode": 400,
                 "body": json.dumps({"error": "Missing image field"})
             }
-            
+        '''    
         bboxes = input_data.get('bboxes')
         if not bboxes:
             logging.error("Missing bboxes field")
@@ -737,9 +741,15 @@ def handle(req, context):
         decode_start = time.time()
         metrics["timings"]["initialization"] = decode_start - init_start
         try:
-            decoded_image = base64.b64decode(encoded_image)
-            nparr = np.frombuffer(decoded_image, np.uint8)
-            image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            # decoded_image = base64.b64decode(encoded_image)
+            # nparr = np.frombuffer(decoded_image, np.uint8)
+            # image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            # Calculate image index from frame_id (modulo operation)
+            image_index = frame_id % 100
+            # Format image filename with leading zeros (e.g., 000076.jpeg)
+            image_filename = f"{image_index:06d}.jpeg"
+            image_path = f"function/camera_stream_data/{image_filename}"
+            image = cv2.imread(image_path)
             if image is None:
                 raise ValueError("Failed to decode image")
             logging.info(f"Successfully decoded image, shape: {image.shape}")
@@ -751,7 +761,7 @@ def handle(req, context):
             }
         
         metrics["timings"]["image_decoding"] = time.time() - decode_start
-        metrics["sizes"]["image_kb"] = len(decoded_image) / 1024.0
+        # metrics["sizes"]["image_kb"] = len(decoded_image) / 1024.0
 
         # Mark end of pre-state processing and start of state handling
         pre_state_end_time = time.time()
@@ -847,7 +857,7 @@ def handle(req, context):
         # Calculate idle time from retrieval metrics
         idle_time = 0
         if retrieval_details.get("already_available") == 0:
-            idle_time = retrieval_details.get("waiting_time", 0)
+            idle_time = retrieval_details.get("waiting_time", 0) / 1000.0
 
         # Debug output to verify metrics are populated
         logging.info(f"Retrieval details: {retrieval_details}")

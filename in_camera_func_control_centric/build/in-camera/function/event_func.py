@@ -146,7 +146,7 @@ class Tracklet:
 
 class VehicleTracking:
 
-    def __init__(self, max_age=50, min_hits=1):
+    def __init__(self, max_age=100, min_hits=1):
         self.max_age = max_age
         self.mot_tracker = Sort(max_age, min_hits)
         self.tracklets = {}
