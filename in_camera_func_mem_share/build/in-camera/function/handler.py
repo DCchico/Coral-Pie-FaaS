@@ -741,15 +741,9 @@ def handle(req, context):
         decode_start = time.time()
         metrics["timings"]["initialization"] = decode_start - init_start
         try:
-            # decoded_image = base64.b64decode(encoded_image)
-            # nparr = np.frombuffer(decoded_image, np.uint8)
-            # image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-            # Calculate image index from frame_id (modulo operation)
-            image_index = frame_id % 100
-            # Format image filename with leading zeros (e.g., 000076.jpeg)
-            image_filename = f"{image_index:06d}.jpeg"
-            image_path = f"function/camera_stream_data/{image_filename}"
-            image = cv2.imread(image_path)
+            decoded_image = base64.b64decode(encoded_image)
+            nparr = np.frombuffer(decoded_image, np.uint8)
+            image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
             if image is None:
                 raise ValueError("Failed to decode image")
             logging.info(f"Successfully decoded image, shape: {image.shape}")
